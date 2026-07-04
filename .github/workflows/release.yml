@@ -1,0 +1,41 @@
+# Copyright 2026 Ronny Trommer <ronny@no42.org>
+# SPDX-License-Identifier: MIT
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release (${{ matrix.target_name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_name: linux-x86_64
+          - os: macos-latest
+            target_name: macos-arm64
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Build & test
+        run: make verify
+
+      - name: Package
+        run: |
+          tar -czf "amiga-game-vault-${{ github.ref_name }}-${{ matrix.target_name }}.tar.gz" \
+            -C target/release amiga-game-vault
+
+      - name: Publish release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: amiga-game-vault-*.tar.gz
+          generate_release_notes: true
