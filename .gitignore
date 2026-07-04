@@ -1,0 +1,12 @@
+/target
+Cargo.lock
+
+# Runtime data
+/data
+*.sqlite
+*.sqlite-*
+
+# AI tools
+_bmad-output/
+_bmad/
+openspec/
