@@ -28,15 +28,15 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/editions", get(editions))
-        .route("/api/editions/:id/variants", get(variants))
-        .route("/api/editions/:id/primary", post(set_primary))
-        .route("/api/artifact/:uid", get(artifact))
+        .route("/api/editions/{id}/variants", get(variants))
+        .route("/api/editions/{id}/primary", post(set_primary))
+        .route("/api/artifact/{uid}", get(artifact))
         .route("/api/upload", post(upload))
         .route("/api/import-dat", post(import_dat))
         .route("/api/quarantine", get(quarantine))
-        .route("/api/quarantine/:uid/resolve", post(resolve))
-        .route("/download/:uid", get(download))
-        .route("/export/edition/:id", get(export_edition))
+        .route("/api/quarantine/{uid}/resolve", post(resolve))
+        .route("/download/{uid}", get(download))
+        .route("/export/edition/{id}", get(export_edition))
         .with_state(state)
 }
 
@@ -363,3 +363,18 @@ load();
 </body>
 </html>
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn router_builds_without_panicking() {
+        // Constructing the Router panics if any route uses invalid capture
+        // syntax (e.g. axum 0.7 `:id` vs 0.8 `{id}`). This guards a class of
+        // failure the handler tests never exercise.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open_memory(dir.path()).unwrap();
+        let _router = router(Arc::new(Mutex::new(vault)));
+    }
+}
