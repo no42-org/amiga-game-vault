@@ -44,7 +44,8 @@ fn attr(fragment: &str, key: &str) -> Option<String> {
 }
 
 fn norm_hash(h: Option<String>) -> Option<String> {
-    h.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty())
+    h.map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
 }
 
 /// Parse a Logiqx-format DAT into entries, tagging them with `source`.
@@ -95,8 +96,16 @@ pub fn match_entry<'a>(entries: &'a [DatEntry], hashes: &Hashes) -> Option<&'a D
     entries
         .iter()
         .find(|e| e.sha1.as_deref() == Some(hashes.sha1.as_str()))
-        .or_else(|| entries.iter().find(|e| e.md5.as_deref() == Some(hashes.md5.as_str())))
-        .or_else(|| entries.iter().find(|e| e.crc32.as_deref() == Some(hashes.crc32.as_str())))
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|e| e.md5.as_deref() == Some(hashes.md5.as_str()))
+        })
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|e| e.crc32.as_deref() == Some(hashes.crc32.as_str()))
+        })
 }
 
 #[cfg(test)]
@@ -140,7 +149,10 @@ mod tests {
             crc32: "ffffffff".into(),
             md5: "zz".into(),
         };
-        assert_eq!(match_entry(&entries, &hit).unwrap().title.as_deref(), Some("A-10 Tank Killer"));
+        assert_eq!(
+            match_entry(&entries, &hit).unwrap().title.as_deref(),
+            Some("A-10 Tank Killer")
+        );
 
         // No sha1/md5 match, but crc32 matches the second entry.
         let by_crc = Hashes {
@@ -150,7 +162,11 @@ mod tests {
         };
         assert_eq!(match_entry(&entries, &by_crc).unwrap().disk_count, Some(11));
 
-        let miss = Hashes { sha1: "x".into(), crc32: "y".into(), md5: "z".into() };
+        let miss = Hashes {
+            sha1: "x".into(),
+            crc32: "y".into(),
+            md5: "z".into(),
+        };
         assert!(match_entry(&entries, &miss).is_none());
     }
 }

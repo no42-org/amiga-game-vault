@@ -49,9 +49,7 @@ pub fn parse_tosec(filename: &str) -> Option<TosecName> {
 
     // Title = everything before the first '(' or '['. A name with no metadata
     // groups at all is not TOSEC-shaped and cannot be identified from its name.
-    let Some(first_marker) = stem.find(['(', '[']) else {
-        return None;
-    };
+    let first_marker = stem.find(['(', '['])?;
     let mut title = stem[..first_marker].trim().to_string();
     if title.is_empty() {
         return None;
@@ -298,20 +296,28 @@ mod tests {
 
     #[test]
     fn parse_a10_variant() {
-        let n = parse_tosec("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[h QTX][a2 highscore].adf")
-            .unwrap();
+        let n = parse_tosec(
+            "A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[h QTX][a2 highscore].adf",
+        )
+        .unwrap();
         assert_eq!(n.title, "A-10 Tank Killer");
         assert_eq!(n.version.as_deref(), Some("v1.0"));
         assert_eq!(n.year, Some(1990));
         assert_eq!(n.publisher.as_deref(), Some("Dynamix"));
         assert_eq!(n.disk_no, Some(1));
         assert_eq!(n.disk_count, Some(2));
-        assert_eq!(n.flags, vec!["h QTX".to_string(), "a2 highscore".to_string()]);
+        assert_eq!(
+            n.flags,
+            vec!["h QTX".to_string(), "a2 highscore".to_string()]
+        );
     }
 
     #[test]
     fn parse_mi2_language_editions() {
-        let it = parse_tosec("Monkey Island 2 - LeChuck's Revenge v1.0 (1992)(C.T.O.)(IT)(Disk 1 of 11)[cr IBB].adf").unwrap();
+        let it = parse_tosec(
+            "Monkey Island 2 - LeChuck's Revenge v1.0 (1992)(C.T.O.)(IT)(Disk 1 of 11)[cr IBB].adf",
+        )
+        .unwrap();
         assert_eq!(it.language.as_deref(), Some("it"));
         assert_eq!(it.disk_count, Some(11));
         assert_eq!(it.publisher.as_deref(), Some("C.T.O."));
@@ -327,9 +333,15 @@ mod tests {
             sanitize_title("Monkey Island 2 - LeChuck's Revenge"),
             "Monkey-Island-2-LeChucks-Revenge"
         );
-        assert_eq!(sanitize_title("Turrican II: The Final Fight"), "Turrican-II-The-Final-Fight");
+        assert_eq!(
+            sanitize_title("Turrican II: The Final Fight"),
+            "Turrican-II-The-Final-Fight"
+        );
         assert_eq!(sanitize_title("A-10 Tank Killer"), "A-10-Tank-Killer");
-        assert_eq!(sanitize_title("Rick Dangerous & Friends"), "Rick-Dangerous-and-Friends");
+        assert_eq!(
+            sanitize_title("Rick Dangerous & Friends"),
+            "Rick-Dangerous-and-Friends"
+        );
     }
 
     #[test]
@@ -340,7 +352,13 @@ mod tests {
     #[test]
     fn build_full_and_minimal() {
         assert_eq!(
-            build_canonical("A-10 Tank Killer", Some("v1.0"), Some("en"), Some((1, 2)), "a1b2c3d4e5"),
+            build_canonical(
+                "A-10 Tank Killer",
+                Some("v1.0"),
+                Some("en"),
+                Some((1, 2)),
+                "a1b2c3d4e5"
+            ),
             "A-10-Tank-Killer_v1.0_en_d01of02_a1b2c3d4e5.adf"
         );
         assert_eq!(
@@ -351,7 +369,13 @@ mod tests {
 
     #[test]
     fn round_trip_canonical() {
-        let built = build_canonical("A-10 Tank Killer", Some("v1.0"), Some("en"), Some((1, 2)), "a1b2c3d4e5");
+        let built = build_canonical(
+            "A-10 Tank Killer",
+            Some("v1.0"),
+            Some("en"),
+            Some((1, 2)),
+            "a1b2c3d4e5",
+        );
         let parsed = parse_canonical(&built).unwrap();
         assert_eq!(parsed.title, "A-10-Tank-Killer");
         assert_eq!(parsed.version.as_deref(), Some("v1.0"));

@@ -37,7 +37,7 @@ impl DumpType {
     }
 
     /// Parse the stored string form; unknown values fall back to `Original`.
-    pub fn from_str(s: &str) -> DumpType {
+    pub fn from_label(s: &str) -> DumpType {
         match s {
             "cracked" => DumpType::Cracked,
             "hacked" => DumpType::Hacked,
@@ -145,8 +145,15 @@ pub fn interpret_flags(flags: &[String]) -> DumpInfo {
             "!" => info.verified_good = true,
             other if other.starts_with('a') => {
                 // Alternate dump: `a`, `a2`, `a3`, ... (the tag may carry a number).
-                let num: String = other[1..].chars().take_while(|c| c.is_ascii_digit()).collect();
-                info.alt_index = if num.is_empty() { 1 } else { num.parse().unwrap_or(1) };
+                let num: String = other[1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                info.alt_index = if num.is_empty() {
+                    1
+                } else {
+                    num.parse().unwrap_or(1)
+                };
             }
             _ => {}
         }
@@ -237,17 +244,25 @@ mod tests {
 
     #[test]
     fn interpret_bad_and_virus_disqualify() {
-        let bad = interpret_flags(&p("Agony (1992)(Psygnosis)(Disk 1 of 3)[cr CSL][b corrupt file].adf").flags);
+        let bad = interpret_flags(
+            &p("Agony (1992)(Psygnosis)(Disk 1 of 3)[cr CSL][b corrupt file].adf").flags,
+        );
         assert!(bad.bad && bad.disqualified());
-        let vir = interpret_flags(&p("Monkey Island 2 (1992)(x)(Disk 1 of 11)[h GF][v Saddam 1].adf").flags);
+        let vir = interpret_flags(
+            &p("Monkey Island 2 (1992)(x)(Disk 1 of 11)[h GF][v Saddam 1].adf").flags,
+        );
         assert!(vir.virus && vir.disqualified());
     }
 
     #[test]
     fn interpret_alt_index() {
-        let a2 = interpret_flags(&p("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[h QTX][a2 highscore].adf").flags);
+        let a2 = interpret_flags(
+            &p("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[h QTX][a2 highscore].adf").flags,
+        );
         assert_eq!(a2.alt_index, 2);
-        let base = interpret_flags(&p("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[h QTX].adf").flags);
+        let base = interpret_flags(
+            &p("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[h QTX].adf").flags,
+        );
         assert_eq!(base.alt_index, 0);
     }
 

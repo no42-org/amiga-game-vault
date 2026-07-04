@@ -150,7 +150,9 @@ async fn import_dat(
 
 async fn quarantine(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppErr> {
     let v = lock(&state);
-    Ok(Json(serde_json::json!({ "quarantine": v.quarantine_list()? })))
+    Ok(Json(
+        serde_json::json!({ "quarantine": v.quarantine_list()? }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

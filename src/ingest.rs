@@ -194,9 +194,8 @@ fn decode_dms(bytes: &[u8]) -> Result<Vec<u8>> {
         Ok(s) if s.success() => {
             // xdms writes input.adf alongside the .dms.
             let adf_path = dir.path().join("input.adf");
-            std::fs::read(&adf_path).map_err(|e| {
-                Error::Decode(format!("xdms produced no readable ADF: {e}"))
-            })
+            std::fs::read(&adf_path)
+                .map_err(|e| Error::Decode(format!("xdms produced no readable ADF: {e}")))
         }
         Ok(s) => Err(Error::Decode(format!("xdms exited with status {s}"))),
         Err(e) => Err(Error::Decode(format!(
@@ -235,19 +234,36 @@ mod tests {
 
     #[test]
     fn detect_by_extension_and_magic() {
-        assert_eq!(detect_container("x.adf", &[0u8; 10]).unwrap(), Container::Adf);
-        assert_eq!(detect_container("x.adz", &[0x1f, 0x8b, 0, 0]).unwrap(), Container::Adz);
-        assert_eq!(detect_container("x.dms", b"DMS!....").unwrap(), Container::Dms);
-        assert_eq!(detect_container("x.zip", b"PK\x03\x04").unwrap(), Container::Zip);
+        assert_eq!(
+            detect_container("x.adf", &[0u8; 10]).unwrap(),
+            Container::Adf
+        );
+        assert_eq!(
+            detect_container("x.adz", &[0x1f, 0x8b, 0, 0]).unwrap(),
+            Container::Adz
+        );
+        assert_eq!(
+            detect_container("x.dms", b"DMS!....").unwrap(),
+            Container::Dms
+        );
+        assert_eq!(
+            detect_container("x.zip", b"PK\x03\x04").unwrap(),
+            Container::Zip
+        );
         // Magic wins when the extension is unknown.
-        assert_eq!(detect_container("mystery", &[0x1f, 0x8b]).unwrap(), Container::Adz);
+        assert_eq!(
+            detect_container("mystery", &[0x1f, 0x8b]).unwrap(),
+            Container::Adz
+        );
         assert!(detect_container("mystery.txt", b"hello").is_err());
     }
 
     #[test]
     fn decode_raw_adf_passthrough() {
         let tools = Tools;
-        let out = tools.decode(Container::Adf, b"raw-adf-bytes", "Game.adf").unwrap();
+        let out = tools
+            .decode(Container::Adf, b"raw-adf-bytes", "Game.adf")
+            .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].adf, b"raw-adf-bytes");
         assert_eq!(out[0].container, Container::Adf);
@@ -271,8 +287,8 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-            let opts: zip::write::FileOptions =
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let opts: zip::write::FileOptions = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
             zw.start_file("A-10.adf", opts).unwrap();
             zw.write_all(b"adf-in-zip").unwrap();
             zw.start_file("readme.txt", opts).unwrap();

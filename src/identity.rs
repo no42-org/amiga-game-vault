@@ -16,7 +16,7 @@ use sha1::{Digest, Sha1};
 pub const UID_LEN: usize = 10;
 
 /// The three content hashes of an artifact, as lowercase hex strings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hashes {
     pub sha1: String,
     pub crc32: String,
@@ -131,8 +131,9 @@ mod tests {
     #[test]
     fn uid_stable_for_same_sha() {
         let sha = "abcdef0123456789000000000000000000000000";
-        let owners: HashMap<String, String> =
-            [("abcdef0123".to_string(), sha.to_string())].into_iter().collect();
+        let owners: HashMap<String, String> = [("abcdef0123".to_string(), sha.to_string())]
+            .into_iter()
+            .collect();
         // Same owner -> not a collision -> keeps the short form.
         let uid = unique_uid(sha, |u| owners.get(u).map(|s| s.as_str()));
         assert_eq!(uid, "abcdef0123");

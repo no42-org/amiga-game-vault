@@ -21,6 +21,10 @@ use crate::naming::{parse_tosec, TosecName};
 use crate::ranking::{primary_set_for_lineage, select_primary, select_primary_lineage, DiskMember};
 use crate::{Error, Result};
 
+/// A resolved identity: parsed name, interpreted dump info, and the
+/// authoritative canonical name to retain.
+type Identity = (TosecName, DumpInfo, String);
+
 /// The outcome of ingesting one decoded ADF.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -60,8 +64,16 @@ impl Vault {
         std::fs::create_dir_all(data_dir)?;
         let store = crate::store::BlobStore::open(data_dir.join("blobs"))?;
         let db_path = data_dir.join("vault.sqlite");
-        let db = Db::open(db_path.to_str().ok_or_else(|| Error::Invalid("bad data dir".into()))?)?;
-        Ok(Self { store, db, tools: Tools })
+        let db = Db::open(
+            db_path
+                .to_str()
+                .ok_or_else(|| Error::Invalid("bad data dir".into()))?,
+        )?;
+        Ok(Self {
+            store,
+            db,
+            tools: Tools,
+        })
     }
 
     /// A vault backed entirely in memory (for tests).
@@ -128,13 +140,22 @@ impl Vault {
                 rec.edition_id = Some(edition_id);
                 self.db.insert_artifact(&rec)?;
                 self.recompute_set_primaries(edition_id)?;
-                Ok(IngestOutcome::Stored { uid, verified, quarantined: false })
+                Ok(IngestOutcome::Stored {
+                    uid,
+                    verified,
+                    quarantined: false,
+                })
             }
             None => {
                 // Unidentifiable: store bare and quarantine.
                 self.db.insert_artifact(&rec)?;
-                self.db.quarantine(&uid, "no DAT match and unparseable filename")?;
-                Ok(IngestOutcome::Stored { uid, verified: false, quarantined: true })
+                self.db
+                    .quarantine(&uid, "no DAT match and unparseable filename")?;
+                Ok(IngestOutcome::Stored {
+                    uid,
+                    verified: false,
+                    quarantined: true,
+                })
             }
         }
     }
@@ -142,11 +163,7 @@ impl Vault {
     /// Resolve identity: prefer a verified hash match, else a filename parse.
     /// Returns the parsed name, interpreted dump info, and the authoritative
     /// canonical name to retain.
-    fn identify(
-        &self,
-        name: &str,
-        hashes: &Hashes,
-    ) -> Result<(Option<(TosecName, DumpInfo, String)>, bool)> {
+    fn identify(&self, name: &str, hashes: &Hashes) -> Result<(Option<Identity>, bool)> {
         if let Some(entry) = self.db.match_dat(hashes)? {
             // Authoritative: build identity from the DAT's canonical name.
             let parsed = parse_tosec(&entry.name).unwrap_or_else(|| dat_to_name(&entry));
@@ -181,8 +198,10 @@ impl Vault {
 
         for (ed_id, disk_no) in &siblings {
             let infos = self.db.edition_variant_infos(*ed_id)?;
-            let variants: Vec<(DumpInfo, String)> =
-                infos.iter().map(|(uid, info)| (info.clone(), uid.clone())).collect();
+            let variants: Vec<(DumpInfo, String)> = infos
+                .iter()
+                .map(|(uid, info)| (info.clone(), uid.clone()))
+                .collect();
 
             // Baseline per-Edition primary.
             let primary = select_primary(&variants).map(|i| variants[i].1.clone());
@@ -261,7 +280,11 @@ impl Vault {
             disk_no: meta.disk_no,
             disk_count: meta.disk_count,
         };
-        let category = if meta.category.is_empty() { "game" } else { &meta.category };
+        let category = if meta.category.is_empty() {
+            "game"
+        } else {
+            &meta.category
+        };
         let edition_id = self.ensure_edition(category, &key)?;
         self.db.set_artifact_edition(uid, edition_id)?;
         self.db.set_display_title(uid, &meta.title)?;
@@ -331,8 +354,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = Vault::open_memory(dir.path()).unwrap();
         let bytes = adf("same");
-        let a = v.ingest("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[cr QTX].adf", &bytes).unwrap();
-        let b = v.ingest("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[cr QTX].adf", &bytes).unwrap();
+        let a = v
+            .ingest(
+                "A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[cr QTX].adf",
+                &bytes,
+            )
+            .unwrap();
+        let b = v
+            .ingest(
+                "A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[cr QTX].adf",
+                &bytes,
+            )
+            .unwrap();
         assert!(matches!(a[0], IngestOutcome::Stored { .. }));
         assert!(matches!(b[0], IngestOutcome::Duplicate { .. }));
     }
@@ -342,7 +375,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = Vault::open_memory(dir.path()).unwrap();
         let out = v.ingest("disk047.adf", &adf("junk")).unwrap();
-        assert!(matches!(out[0], IngestOutcome::Stored { quarantined: true, .. }));
+        assert!(matches!(
+            out[0],
+            IngestOutcome::Stored {
+                quarantined: true,
+                ..
+            }
+        ));
         assert_eq!(v.quarantine_list().unwrap().len(), 1);
     }
 }

@@ -18,10 +18,10 @@ use crate::edition::DumpInfo;
 fn rank_key(info: &DumpInfo) -> (bool, u32, bool, u32) {
     let is_clean = info.verified_good || info.modifications == 0;
     (
-        !is_clean,             // clean (verified/original) first
-        info.modifications,    // fewest modifications
+        !is_clean,              // clean (verified/original) first
+        info.modifications,     // fewest modifications
         info.trainer.is_some(), // trainer-free preferred
-        info.alt_index,        // base dump before [a], [a2], ...
+        info.alt_index,         // base dump before [a], [a2], ...
     )
 }
 
@@ -61,7 +61,9 @@ pub fn select_primary_lineage(members: &[DiskMember], disk_count: u32) -> Option
         if m.info.disqualified() {
             continue;
         }
-        by.entry(m.lineage.clone().unwrap_or_default()).or_default().push(i);
+        by.entry(m.lineage.clone().unwrap_or_default())
+            .or_default()
+            .push(i);
     }
     if by.is_empty() {
         return None;
@@ -124,8 +126,14 @@ mod tests {
     #[test]
     fn disqualified_never_primary() {
         let variants = vec![
-            (info("Agony (1992)(P)(Disk 1 of 3)[cr CSL][b corrupt file].adf"), "uid_bad".into()),
-            (info("Agony (1992)(P)(Disk 1 of 3)[cr CSL].adf"), "uid_ok".into()),
+            (
+                info("Agony (1992)(P)(Disk 1 of 3)[cr CSL][b corrupt file].adf"),
+                "uid_bad".into(),
+            ),
+            (
+                info("Agony (1992)(P)(Disk 1 of 3)[cr CSL].adf"),
+                "uid_ok".into(),
+            ),
         ];
         let idx = select_primary(&variants).unwrap();
         assert_eq!(variants[idx].1, "uid_ok");
@@ -134,8 +142,14 @@ mod tests {
     #[test]
     fn prefers_least_modified() {
         let variants = vec![
-            (info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX][t +5][h SR].adf"), "uid_heavy".into()),
-            (info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX].adf"), "uid_light".into()),
+            (
+                info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX][t +5][h SR].adf"),
+                "uid_heavy".into(),
+            ),
+            (
+                info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX].adf"),
+                "uid_light".into(),
+            ),
         ];
         let idx = select_primary(&variants).unwrap();
         assert_eq!(variants[idx].1, "uid_light");
@@ -144,8 +158,14 @@ mod tests {
     #[test]
     fn prefers_verified_original() {
         let variants = vec![
-            (info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX].adf"), "uid_crack".into()),
-            (info("A-10 (1990)(D)(Disk 1 of 2)[!].adf"), "uid_verified".into()),
+            (
+                info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX].adf"),
+                "uid_crack".into(),
+            ),
+            (
+                info("A-10 (1990)(D)(Disk 1 of 2)[!].adf"),
+                "uid_verified".into(),
+            ),
         ];
         let idx = select_primary(&variants).unwrap();
         assert_eq!(variants[idx].1, "uid_verified");
@@ -154,8 +174,14 @@ mod tests {
     #[test]
     fn base_before_alternate_and_deterministic() {
         let variants = vec![
-            (info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX][a2].adf"), "uid_a2".into()),
-            (info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX].adf"), "uid_base".into()),
+            (
+                info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX][a2].adf"),
+                "uid_a2".into(),
+            ),
+            (
+                info("A-10 (1990)(D)(Disk 1 of 2)[cr QTX].adf"),
+                "uid_base".into(),
+            ),
         ];
         assert_eq!(variants[select_primary(&variants).unwrap()].1, "uid_base");
         // Deterministic: reversing input order yields the same winner.
@@ -167,8 +193,14 @@ mod tests {
     #[test]
     fn all_disqualified_returns_none() {
         let variants = vec![
-            (info("A-10 (1990)(D)(Disk 1 of 2)[cr X][b].adf"), "uid1".into()),
-            (info("A-10 (1990)(D)(Disk 1 of 2)[h Y][v virus].adf"), "uid2".into()),
+            (
+                info("A-10 (1990)(D)(Disk 1 of 2)[cr X][b].adf"),
+                "uid1".into(),
+            ),
+            (
+                info("A-10 (1990)(D)(Disk 1 of 2)[h Y][v virus].adf"),
+                "uid2".into(),
+            ),
         ];
         assert!(select_primary(&variants).is_none());
     }
@@ -196,6 +228,10 @@ mod tests {
         let lineage = select_primary_lineage(&members, 3).unwrap();
         assert_eq!(lineage, "DTC");
         let set = primary_set_for_lineage(&members, &lineage);
-        assert_eq!(set.len(), 3, "primary set spans all three disks of one lineage");
+        assert_eq!(
+            set.len(),
+            3,
+            "primary set spans all three disks of one lineage"
+        );
     }
 }

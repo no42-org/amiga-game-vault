@@ -19,6 +19,9 @@ use crate::Result;
 
 const MIGRATION: &str = include_str!("../migrations/0001_init.sql");
 
+/// The disk count of a set and its sibling Editions as `(edition_id, disk_no)`.
+type SetSiblings = (Option<u32>, Vec<(i64, Option<u32>)>);
+
 /// A new artifact row to insert.
 #[derive(Debug, Clone, Default)]
 pub struct NewArtifact {
@@ -44,16 +47,6 @@ pub struct NewArtifact {
     pub container: String,
     pub decoded_sha1: Option<String>,
     pub blob_sha1: String,
-}
-
-impl Default for Hashes {
-    fn default() -> Self {
-        Hashes {
-            sha1: String::new(),
-            crc32: String::new(),
-            md5: String::new(),
-        }
-    }
 }
 
 /// A view of an Edition for browsing.
@@ -94,7 +87,10 @@ pub struct ArtifactView {
 impl ArtifactView {
     /// The canonical filename projected from this artifact's metadata.
     fn canonical(&self) -> String {
-        let title = self.display_title.clone().unwrap_or_else(|| "Unknown".into());
+        let title = self
+            .display_title
+            .clone()
+            .unwrap_or_else(|| "Unknown".into());
         let disk = match (self.disk_no, self.disk_count) {
             (Some(n), Some(m)) => Some((n, m)),
             _ => None,
@@ -190,7 +186,9 @@ impl Db {
     pub fn artifact_uid_by_sha1(&self, sha1: &str) -> Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT uid FROM artifact WHERE sha1 = ?1", [sha1], |r| r.get(0))
+            .query_row("SELECT uid FROM artifact WHERE sha1 = ?1", [sha1], |r| {
+                r.get(0)
+            })
             .optional()?)
     }
 
@@ -202,7 +200,9 @@ impl Db {
             let cand = &sha1[..len.min(sha1.len())];
             let conflict: Option<String> = self
                 .conn
-                .query_row("SELECT sha1 FROM artifact WHERE uid = ?1", [cand], |r| r.get(0))
+                .query_row("SELECT sha1 FROM artifact WHERE uid = ?1", [cand], |r| {
+                    r.get(0)
+                })
                 .optional()?;
             match conflict {
                 Some(other) if other != sha1 => {
@@ -238,7 +238,14 @@ impl Db {
             .query_row(
                 "SELECT id FROM edition WHERE title_id = ?1 AND version IS ?2 AND language IS ?3
                      AND publisher IS ?4 AND disk_no IS ?5 AND disk_count IS ?6",
-                params![title_id, key.version, key.language, key.publisher, key.disk_no, key.disk_count],
+                params![
+                    title_id,
+                    key.version,
+                    key.language,
+                    key.publisher,
+                    key.disk_no,
+                    key.disk_count
+                ],
                 |r| r.get(0),
             )
             .optional()?;
@@ -248,7 +255,14 @@ impl Db {
         self.conn.execute(
             "INSERT INTO edition (title_id, version, language, publisher, disk_no, disk_count)
              VALUES (?1,?2,?3,?4,?5,?6)",
-            params![title_id, key.version, key.language, key.publisher, key.disk_no, key.disk_count],
+            params![
+                title_id,
+                key.version,
+                key.language,
+                key.publisher,
+                key.disk_no,
+                key.disk_count
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -276,7 +290,9 @@ impl Db {
             .query_map([edition_id], |r| {
                 let uid: String = r.get(0)?;
                 let info = DumpInfo {
-                    dump_type: DumpType::from_str(&r.get::<_, Option<String>>(1)?.unwrap_or_default()),
+                    dump_type: DumpType::from_label(
+                        &r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ),
                     crack_group: r.get(2)?,
                     trainer: r.get(3)?,
                     bad: r.get::<_, i32>(4)? != 0,
@@ -296,14 +312,16 @@ impl Db {
 
     /// The disk count of an Edition and every sibling Edition in the same set
     /// (same title/version/language/publisher, any disk number).
-    pub fn set_siblings(&self, edition_id: i64) -> Result<(Option<u32>, Vec<(i64, Option<u32>)>)> {
-        let (title_id, version, language, publisher, disk_count): (
+    pub fn set_siblings(&self, edition_id: i64) -> Result<SetSiblings> {
+        // (title_id, version, language, publisher, disk_count)
+        type SetMeta = (
             i64,
             Option<String>,
             Option<String>,
             Option<String>,
             Option<u32>,
-        ) = self.conn.query_row(
+        );
+        let (title_id, version, language, publisher, disk_count): SetMeta = self.conn.query_row(
             "SELECT title_id, version, language, publisher, disk_count FROM edition WHERE id = ?1",
             [edition_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
@@ -421,7 +439,11 @@ impl Db {
         );
         let primary: Option<String> = self
             .conn
-            .query_row("SELECT primary_artifact_uid FROM edition WHERE id = ?1", [edition_id], |r| r.get(0))
+            .query_row(
+                "SELECT primary_artifact_uid FROM edition WHERE id = ?1",
+                [edition_id],
+                |r| r.get(0),
+            )
             .optional()?
             .flatten();
         let mut stmt = self.conn.prepare(&sql)?;
@@ -444,7 +466,9 @@ impl Db {
         status: Option<&str>,
     ) -> Result<Vec<EditionView>> {
         // Bind exactly three params, always referenced; empty strings are no-ops.
-        let like = q.map(|s| format!("%{s}%")).unwrap_or_else(|| "%".to_string());
+        let like = q
+            .map(|s| format!("%{s}%"))
+            .unwrap_or_else(|| "%".to_string());
         let cat = category.unwrap_or("").to_string();
         let lang = language.unwrap_or("").to_string();
         let mut sql = String::from(
@@ -469,23 +493,20 @@ impl Db {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(
-                params![like, cat, lang],
-                |r| {
-                    Ok(EditionView {
-                        edition_id: r.get(0)?,
-                        title: r.get(1)?,
-                        category: r.get(2)?,
-                        version: r.get(3)?,
-                        language: r.get(4)?,
-                        publisher: r.get(5)?,
-                        disk_no: r.get(6)?,
-                        disk_count: r.get(7)?,
-                        primary_uid: r.get(8)?,
-                        variant_count: r.get(9)?,
-                    })
-                },
-            )?
+            .query_map(params![like, cat, lang], |r| {
+                Ok(EditionView {
+                    edition_id: r.get(0)?,
+                    title: r.get(1)?,
+                    category: r.get(2)?,
+                    version: r.get(3)?,
+                    language: r.get(4)?,
+                    publisher: r.get(5)?,
+                    disk_no: r.get(6)?,
+                    disk_count: r.get(7)?,
+                    primary_uid: r.get(8)?,
+                    variant_count: r.get(9)?,
+                })
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -529,9 +550,16 @@ mod tests {
             container: "adf".into(),
             ..Default::default()
         };
-        a.hashes = Hashes { sha1: sha.into(), crc32: "c".into(), md5: "m".into() };
+        a.hashes = Hashes {
+            sha1: sha.into(),
+            crc32: "c".into(),
+            md5: "m".into(),
+        };
         db.insert_artifact(&a).unwrap();
 
-        assert_eq!(db.artifact_uid_by_sha1(sha).unwrap().as_deref(), Some(uid.as_str()));
+        assert_eq!(
+            db.artifact_uid_by_sha1(sha).unwrap().as_deref(),
+            Some(uid.as_str())
+        );
     }
 }

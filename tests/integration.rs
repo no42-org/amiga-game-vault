@@ -39,7 +39,11 @@ fn a10_variants_collapse_and_pick_clean_primary() {
 
     // All six variants land in a single Edition.
     let editions = vault.browse(Some("A-10"), None, None, None).unwrap();
-    assert_eq!(editions.len(), 1, "all A-10 disk-1 variants form one Edition");
+    assert_eq!(
+        editions.len(),
+        1,
+        "all A-10 disk-1 variants form one Edition"
+    );
     let ed = &editions[0];
     assert_eq!(ed.title, "A-10 Tank Killer");
     assert_eq!(ed.disk_no, Some(1));
@@ -56,7 +60,12 @@ fn a10_variants_collapse_and_pick_clean_primary() {
     // ...and it must never be the corrupt/bad dump.
     let bad = variants
         .iter()
-        .find(|v| v.tosec_name.as_deref().map(|n| n.contains("corrupt")).unwrap_or(false))
+        .find(|v| {
+            v.tosec_name
+                .as_deref()
+                .map(|n| n.contains("corrupt"))
+                .unwrap_or(false)
+        })
         .unwrap();
     assert!(!bad.is_primary, "a bad dump is never primary");
 
@@ -66,7 +75,9 @@ fn a10_variants_collapse_and_pick_clean_primary() {
         "unexpected canonical name: {}",
         primary.canonical_name
     );
-    assert!(primary.canonical_name.ends_with(&format!("_{}.adf", primary.uid)));
+    assert!(primary
+        .canonical_name
+        .ends_with(&format!("_{}.adf", primary.uid)));
 
     // Download serves the stored bytes under the canonical name (bytes unchanged).
     let (name, bytes) = vault.blob_for(&primary.uid).unwrap().unwrap();
@@ -88,11 +99,19 @@ fn mi2_splits_into_three_language_editions() {
         ingest(&vault, n);
     }
 
-    let editions = vault.browse(Some("Monkey Island 2"), None, None, None).unwrap();
-    assert_eq!(editions.len(), 3, "IT / US / ES are three distinct Editions");
+    let editions = vault
+        .browse(Some("Monkey Island 2"), None, None, None)
+        .unwrap();
+    assert_eq!(
+        editions.len(),
+        3,
+        "IT / US / ES are three distinct Editions"
+    );
 
     // Filtering by language narrows to the Spanish edition only.
-    let es = vault.browse(Some("Monkey Island 2"), None, Some("es"), None).unwrap();
+    let es = vault
+        .browse(Some("Monkey Island 2"), None, Some("es"), None)
+        .unwrap();
     assert_eq!(es.len(), 1);
     assert_eq!(es[0].language.as_deref(), Some("es"));
 }
@@ -121,9 +140,15 @@ fn unidentifiable_upload_is_quarantined_then_resolvable() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open_memory(dir.path()).unwrap();
 
-    let out = vault.ingest("mystery-disk-047.adf", &adf_for("mystery")).unwrap();
+    let out = vault
+        .ingest("mystery-disk-047.adf", &adf_for("mystery"))
+        .unwrap();
     let uid = match &out[0] {
-        IngestOutcome::Stored { uid, quarantined: true, .. } => uid.clone(),
+        IngestOutcome::Stored {
+            uid,
+            quarantined: true,
+            ..
+        } => uid.clone(),
         other => panic!("expected quarantine, got {other:?}"),
     };
     assert_eq!(vault.quarantine_list().unwrap().len(), 1);
@@ -152,7 +177,9 @@ fn unidentifiable_upload_is_quarantined_then_resolvable() {
     assert_eq!(editions[0].primary_uid.as_deref(), Some(uid.as_str()));
     // After resolution the artifact has a clean canonical name.
     let art = vault.get_artifact(&uid).unwrap().unwrap();
-    assert!(art.canonical_name.starts_with("Lost-Patrol_v1.0_en_d01of01_"));
+    assert!(art
+        .canonical_name
+        .starts_with("Lost-Patrol_v1.0_en_d01of01_"));
 }
 
 #[test]
@@ -172,12 +199,17 @@ fn multidisk_set_picks_one_coherent_lineage() {
         ingest(&vault, n);
     }
 
-    let editions = vault.browse(Some("Triple Quest"), None, None, None).unwrap();
+    let editions = vault
+        .browse(Some("Triple Quest"), None, None, None)
+        .unwrap();
     assert_eq!(editions.len(), 3, "one Edition per disk");
 
     for ed in &editions {
         let variants = vault.variants(ed.edition_id).unwrap();
-        let primary = variants.iter().find(|v| v.is_primary).expect("each disk has a primary");
+        let primary = variants
+            .iter()
+            .find(|v| v.is_primary)
+            .expect("each disk has a primary");
         assert_eq!(
             primary.crack_group.as_deref(),
             Some("DTC"),
