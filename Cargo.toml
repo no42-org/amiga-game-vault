@@ -25,5 +25,5 @@ crc32fast = "1"
 flate2 = "1"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 hex = "0.4"
-thiserror = "1"
+thiserror = "2"
 tempfile = "3"
