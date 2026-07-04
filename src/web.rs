@@ -250,8 +250,8 @@ fn build_zip(files: &[(String, Vec<u8>)]) -> crate::Result<Vec<u8>> {
     let mut buf = Vec::new();
     {
         let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-        let opts: zip::write::FileOptions =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         for (name, bytes) in files {
             zw.start_file(name, opts)?;
             zw.write_all(bytes)?;
