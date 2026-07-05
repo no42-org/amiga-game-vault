@@ -58,6 +58,8 @@ pub struct EditionView {
     pub version: Option<String>,
     pub language: Option<String>,
     pub publisher: Option<String>,
+    pub qualifier: Option<String>,
+    pub year: Option<i32>,
     pub disk_no: Option<u32>,
     pub disk_count: Option<u32>,
     pub primary_uid: Option<String>,
@@ -126,6 +128,16 @@ impl Db {
 
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(MIGRATION)?;
+        // Idempotent column addition for databases created before `qualifier`.
+        match self
+            .conn
+            .execute("ALTER TABLE edition ADD COLUMN qualifier TEXT", [])
+        {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                if msg.contains("duplicate column") => {}
+            Err(e) => return Err(e.into()),
+        }
         Ok(())
     }
 
@@ -237,12 +249,13 @@ impl Db {
             .conn
             .query_row(
                 "SELECT id FROM edition WHERE title_id = ?1 AND version IS ?2 AND language IS ?3
-                     AND publisher IS ?4 AND disk_no IS ?5 AND disk_count IS ?6",
+                     AND publisher IS ?4 AND qualifier IS ?5 AND disk_no IS ?6 AND disk_count IS ?7",
                 params![
                     title_id,
                     key.version,
                     key.language,
                     key.publisher,
+                    key.qualifier,
                     key.disk_no,
                     key.disk_count
                 ],
@@ -253,13 +266,14 @@ impl Db {
             return Ok(id);
         }
         self.conn.execute(
-            "INSERT INTO edition (title_id, version, language, publisher, disk_no, disk_count)
-             VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO edition (title_id, version, language, publisher, qualifier, disk_no, disk_count)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 title_id,
                 key.version,
                 key.language,
                 key.publisher,
+                key.qualifier,
                 key.disk_no,
                 key.disk_count
             ],
@@ -313,28 +327,40 @@ impl Db {
     /// The disk count of an Edition and every sibling Edition in the same set
     /// (same title/version/language/publisher, any disk number).
     pub fn set_siblings(&self, edition_id: i64) -> Result<SetSiblings> {
-        // (title_id, version, language, publisher, disk_count)
+        // (title_id, version, language, publisher, qualifier, disk_count)
         type SetMeta = (
             i64,
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
             Option<u32>,
         );
-        let (title_id, version, language, publisher, disk_count): SetMeta = self.conn.query_row(
-            "SELECT title_id, version, language, publisher, disk_count FROM edition WHERE id = ?1",
-            [edition_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )?;
+        let (title_id, version, language, publisher, qualifier, disk_count): SetMeta =
+            self.conn.query_row(
+                "SELECT title_id, version, language, publisher, qualifier, disk_count
+                 FROM edition WHERE id = ?1",
+                [edition_id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )?;
 
         let mut stmt = self.conn.prepare(
             "SELECT id, disk_no FROM edition
              WHERE title_id = ?1 AND version IS ?2 AND language IS ?3 AND publisher IS ?4
-                   AND disk_count IS ?5 ORDER BY disk_no",
+                   AND qualifier IS ?5 AND disk_count IS ?6 ORDER BY disk_no",
         )?;
         let siblings = stmt
             .query_map(
-                params![title_id, version, language, publisher, disk_count],
+                params![title_id, version, language, publisher, qualifier, disk_count],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<u32>>(1)?)),
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -472,8 +498,9 @@ impl Db {
         let cat = category.unwrap_or("").to_string();
         let lang = language.unwrap_or("").to_string();
         let mut sql = String::from(
-            "SELECT e.id, t.name, t.category, e.version, e.language, e.publisher, e.disk_no,
-                    e.disk_count, e.primary_artifact_uid,
+            "SELECT e.id, t.name, t.category, e.version, e.language, e.publisher, e.qualifier,
+                    (SELECT a.year FROM artifact a WHERE a.edition_id = e.id AND a.year IS NOT NULL LIMIT 1) AS yr,
+                    e.disk_no, e.disk_count, e.primary_artifact_uid,
                     (SELECT COUNT(*) FROM artifact a WHERE a.edition_id = e.id) AS vc
              FROM edition e JOIN title t ON e.title_id = t.id
              WHERE t.name LIKE ?1
@@ -501,10 +528,12 @@ impl Db {
                     version: r.get(3)?,
                     language: r.get(4)?,
                     publisher: r.get(5)?,
-                    disk_no: r.get(6)?,
-                    disk_count: r.get(7)?,
-                    primary_uid: r.get(8)?,
-                    variant_count: r.get(9)?,
+                    qualifier: r.get(6)?,
+                    year: r.get(7)?,
+                    disk_no: r.get(8)?,
+                    disk_count: r.get(9)?,
+                    primary_uid: r.get(10)?,
+                    variant_count: r.get(11)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -530,6 +559,49 @@ impl Db {
             params![edition_id, uid],
         )?;
         Ok(())
+    }
+
+    // --- Re-identification helpers ----------------------------------------
+
+    /// All artifacts that carry a retained TOSEC name, as `(uid, tosec_name)`.
+    pub fn all_artifacts_named(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, tosec_name FROM artifact WHERE tosec_name IS NOT NULL ORDER BY uid",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The Edition an artifact currently belongs to, if any.
+    pub fn artifact_edition(&self, uid: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT edition_id FROM artifact WHERE uid = ?1",
+                [uid],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Delete Editions that no longer have any artifacts; returns the count.
+    pub fn delete_empty_editions(&self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM edition WHERE id NOT IN
+                 (SELECT edition_id FROM artifact WHERE edition_id IS NOT NULL)",
+            [],
+        )?)
+    }
+
+    /// Delete Titles that no longer have any Editions; returns the count.
+    pub fn delete_empty_titles(&self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM title WHERE id NOT IN (SELECT title_id FROM edition)",
+            [],
+        )?)
     }
 }
 
