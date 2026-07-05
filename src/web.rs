@@ -423,7 +423,7 @@ const dragHasFiles = e => e.dataTransfer && Array.from(e.dataTransfer.types || [
 const resetDrag = () => { dragDepth = 0; overlay.classList.remove('show'); };
 window.addEventListener('dragenter', e => { if (!dragHasFiles(e)) return; e.preventDefault(); dragDepth++; overlay.classList.add('show'); });
 window.addEventListener('dragover', e => { if (dragHasFiles(e)) e.preventDefault(); });
-window.addEventListener('dragleave', e => { if (!dragHasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth || !e.relatedTarget) resetDrag(); });
+window.addEventListener('dragleave', e => { if (!dragHasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) resetDrag(); });
 window.addEventListener('dragend', resetDrag);
 window.addEventListener('drop', async e => {
   if (!dragHasFiles(e)) return;
@@ -475,12 +475,15 @@ async function runQueue() {
   panel.hidden = false;
   panel.innerHTML = '<h3 id="uHead"></h3><div id="uRows"></div><div class="u-summary" id="uSummary">…</div>';
   uRows = document.getElementById('uRows');
+  const uHead = document.getElementById('uHead');
+  const uSummary = document.getElementById('uSummary');
   uTally = { stored: 0, duplicate: 0, quarantined: 0, rejected: 0, error: 0 };
   let done = 0;
   while (uQueue.length) {
     const item = uQueue.shift();
-    document.getElementById('uHead').textContent = `Uploading ${done + uQueue.length + 1} file(s)`;
-    if (item.kind) { uTally[item.kind]++; addRow(item.name, item.kind, item.status); done++; continue; }
+    done++;
+    uHead.textContent = `Uploading ${done + uQueue.length} file(s)`;
+    if (item.kind) { uTally[item.kind]++; addRow(item.name, item.kind, item.status); continue; }
     const f = item.file;
     const row = addRow(f.name, 'pending', '…');
     try {
@@ -488,7 +491,7 @@ async function runQueue() {
       if (!r.ok) {
         if (r.status >= 400 && r.status < 500) { uTally.rejected++; setRow(row, 'rejected', 'rejected'); }
         else { uTally.error++; setRow(row, 'error', 'error ' + r.status); }
-        done++; continue;
+        continue;
       }
       const outs = (await r.json()).outcomes || [];
       const c = { stored: 0, duplicate: 0, quarantined: 0 };
@@ -498,15 +501,15 @@ async function runQueue() {
         else if (o.kind === 'stored') (o.quarantined ? c.quarantined++ : c.stored++);
         else bad = true; // unknown kind → not a success
       }
-      if (bad) { uTally.error++; setRow(row, 'error', 'unexpected response'); done++; continue; }
+      // Count any real outcomes even if an unknown kind also appeared.
       uTally.stored += c.stored; uTally.duplicate += c.duplicate; uTally.quarantined += c.quarantined;
+      if (bad) { uTally.error++; setRow(row, 'error', 'unexpected response'); continue; }
       const cls = c.quarantined ? 'quarantined' : c.stored ? 'stored' : 'duplicate';
       setRow(row, cls, outs.length > 1 ? fmtCounts(c, ['stored', 'duplicate', 'quarantined'], ', ') : cls);
     } catch (err) { uTally.error++; setRow(row, 'error', 'error'); }
-    done++;
   }
   const summary = fmtCounts(uTally, ['stored', 'duplicate', 'quarantined', 'rejected', 'error'], ' · ') || 'nothing to upload';
-  document.getElementById('uSummary').innerHTML = 'Done — ' + summary +
+  uSummary.innerHTML = 'Done — ' + summary +
     (uTally.quarantined ? ' · <a href="#" onclick="loadQuarantine();return false">review quarantine</a>' : '');
   uRunning = false;
   load(); // refresh the Edition listing once, after the queue drains

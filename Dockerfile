@@ -43,7 +43,8 @@ VOLUME ["/data"]
 EXPOSE 4500
 USER vault
 
+# Probe the port parsed from VAULT_ADDR so overriding it doesn't break the check.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:4500/ >/dev/null || exit 1
+    CMD curl -fsS "http://127.0.0.1:${VAULT_ADDR##*:}/" >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/amiga-game-vault"]
