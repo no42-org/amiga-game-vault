@@ -368,3 +368,34 @@ fn incomplete_set_is_flagged_and_single_disk_is_trivial() {
     assert!(incomplete.iter().any(|s| s.title == "Lemmings"));
     assert!(!incomplete.iter().any(|s| s.title == "Zool"));
 }
+
+#[test]
+fn export_set_refuses_incomplete_lineage() {
+    // A-Team covers only disks 1 & 2 of a 3-disk set; exporting it must error
+    // rather than silently produce a partial (unbootable) zip.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    for d in 1..=3 {
+        ingest(
+            &vault,
+            &format!("Agony (1992)(Psygnosis)(Disk {d} of 3)[cr CSL].adf"),
+        );
+    }
+    ingest(
+        &vault,
+        "Agony (1992)(Psygnosis)(Disk 1 of 3)[cr A-Team].adf",
+    );
+    ingest(
+        &vault,
+        "Agony (1992)(Psygnosis)(Disk 2 of 3)[cr A-Team].adf",
+    );
+
+    let sets = vault.list_sets(Some("Agony"), None, None, false).unwrap();
+    let rep = sets[0].rep_edition_id;
+
+    // Complete lineage exports fine.
+    assert_eq!(vault.export_set(rep, "CSL").unwrap().len(), 3);
+    // Partial and unknown lineages are refused.
+    assert!(vault.export_set(rep, "A-Team").is_err());
+    assert!(vault.export_set(rep, "Nonexistent").is_err());
+}

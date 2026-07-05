@@ -112,9 +112,8 @@ pub fn lineage_coverage(members: &[DiskMember], disk_count: u32) -> Vec<LineageC
             .or_default()
             .push(i);
     }
-    let primary = select_primary_lineage(members, disk_count);
-
-    // (not_complete, MAX-coverage, sum_mods, tag) — same key as select_primary_lineage.
+    // (not_complete, MAX-coverage, sum_mods, tag) — same key as select_primary_lineage,
+    // so the first row after sorting is the auto-primary lineage.
     let mut scored: Vec<(bool, usize, u32, String, LineageCoverage)> = Vec::new();
     for (tag, idxs) in &by {
         let disks: BTreeSet<u32> = idxs.iter().map(|&i| members[i].disk_no).collect();
@@ -125,12 +124,16 @@ pub fn lineage_coverage(members: &[DiskMember], disk_count: u32) -> Vec<LineageC
             lineage: (!tag.is_empty()).then(|| tag.clone()),
             disks_covered: disks.into_iter().collect(),
             complete,
-            is_primary: primary.as_deref() == Some(tag.as_str()),
+            is_primary: false,
         };
         scored.push((!complete, usize::MAX - coverage, sum_mods, tag.clone(), cov));
     }
     scored.sort_by(|a, b| (a.0, a.1, a.2, &a.3).cmp(&(b.0, b.1, b.2, &b.3)));
-    scored.into_iter().map(|t| t.4).collect()
+    let mut out: Vec<LineageCoverage> = scored.into_iter().map(|t| t.4).collect();
+    if let Some(first) = out.first_mut() {
+        first.is_primary = true;
+    }
+    out
 }
 
 /// Pick the best non-disqualified member of a given lineage for each disk.

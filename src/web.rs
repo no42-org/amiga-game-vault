@@ -131,7 +131,15 @@ async fn set_lineages(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, AppErr> {
     let v = lock(&state);
-    Ok(Json(serde_json::json!({ "lineages": v.set_lineages(id)? })))
+    let disks: Vec<serde_json::Value> = v
+        .set_disks(id)?
+        .into_iter()
+        .map(|(disk_no, edition_id)| serde_json::json!({ "disk_no": disk_no, "edition_id": edition_id }))
+        .collect();
+    Ok(Json(serde_json::json!({
+        "lineages": v.set_lineages(id)?,
+        "disks": disks,
+    })))
 }
 
 async fn export_set(
@@ -461,8 +469,13 @@ async function renderVariants(id) {
         · <a href="/download/${v.uid}">download</a></span></div>`).join('');
 }
 async function renderLineages(id) {
-  const { lineages } = await (await fetch(`/api/sets/${id}/lineages`)).json();
-  return lineages.map(l => {
+  const { lineages, disks } = await (await fetch(`/api/sets/${id}/lineages`)).json();
+  // Disks section — always reachable, even when no lineage is complete.
+  const diskRows = (disks || []).map(d => `<div class="variant">
+      <span style="cursor:pointer" onclick="expandDisk(${d.edition_id})">Disk ${d.disk_no} ▸</span>
+      <span class="meta"><a href="/export/edition/${d.edition_id}">export disk</a></span></div>
+    <div class="variants" id="dv${d.edition_id}"></div>`).join('');
+  const linRows = lineages.map(l => {
     const name = l.lineage ? esc(l.lineage) : '(no group)';
     const badge = l.complete
       ? '<span class="primary">complete</span>'
@@ -473,6 +486,15 @@ async function renderLineages(id) {
       <span class="${l.is_primary ? 'primary' : ''}">${l.is_primary ? '★ ' : ''}<code>${name}</code></span>
       <span class="meta">${badge}${exp}</span></div>`;
   }).join('');
+  return `<div class="meta" style="margin:2px 0">Disks</div>${diskRows}` +
+    `<div class="meta" style="margin:6px 0 2px">Coherent sets</div>${linRows}`;
+}
+async function expandDisk(ed) {
+  const box = document.getElementById('dv' + ed);
+  box.classList.toggle('open');
+  if (box.dataset.loaded) return;
+  box.innerHTML = await renderVariants(ed);
+  box.dataset.loaded = '1';
 }
 async function loadQuarantine() {
   const r = await fetch('/api/quarantine');

@@ -340,14 +340,19 @@ impl Vault {
         for (ed_id, disk_no) in &siblings {
             for (uid, info) in self.db.edition_variant_infos(*ed_id)? {
                 members.push(DiskMember {
-                    disk_no: disk_no.unwrap_or(0),
+                    // A single-disk release with no "Disk N" is its own disk 1.
+                    disk_no: disk_no.unwrap_or(1),
                     lineage: info.lineage.clone(),
                     info,
                     tiebreak: uid,
                 });
             }
         }
-        Ok((disk_count.unwrap_or(1), members))
+        // When the release doesn't declare "of N", require covering every disk we
+        // actually hold, so a lineage that misses a present disk isn't "complete".
+        let max_present = siblings.iter().filter_map(|(_, d)| *d).max().unwrap_or(1);
+        let dc = disk_count.unwrap_or(max_present).max(1);
+        Ok((dc, members))
     }
 
     /// Browse releases: roll up multi-disk Editions into Sets (representative =
@@ -394,17 +399,16 @@ impl Vault {
             disks_present.dedup();
             let variant_count: i64 = editions.iter().map(|e| e.variant_count).sum();
 
-            let (complete_lineages, primary_lineage) = if multi {
-                let covs = self.set_lineages(rep.edition_id)?;
-                let cc = covs.iter().filter(|c| c.complete).count();
-                let pl = covs
-                    .iter()
-                    .find(|c| c.is_primary)
-                    .and_then(|c| c.lineage.clone());
-                (cc, pl)
-            } else {
-                (1, None)
-            };
+            // Completeness is computed the same way for every set (so a single-disk
+            // title whose only variants are disqualified reports 0, like the
+            // multi-disk case). NOTE: this issues per-set reads on browse — cheap at
+            // the current scale; a batched aggregate is a documented follow-up.
+            let covs = self.set_lineages(rep.edition_id)?;
+            let complete_lineages = covs.iter().filter(|c| c.complete).count();
+            let primary_lineage = covs
+                .iter()
+                .find(|c| c.is_primary)
+                .and_then(|c| c.lineage.clone());
             if incomplete_only && complete_lineages > 0 {
                 continue;
             }
@@ -441,6 +445,18 @@ impl Vault {
         Ok(lineage_coverage(&members, dc))
     }
 
+    /// The Set's disks as `(disk_no, edition_id)`, so the UI can always reach the
+    /// disks held even when no lineage is complete.
+    pub fn set_disks(&self, edition_id: i64) -> Result<Vec<(u32, i64)>> {
+        let (_, siblings) = self.db.set_siblings(edition_id)?;
+        let mut disks: Vec<(u32, i64)> = siblings
+            .into_iter()
+            .map(|(ed, dn)| (dn.unwrap_or(0), ed))
+            .collect();
+        disks.sort_by_key(|(dn, _)| *dn);
+        Ok(disks)
+    }
+
     /// Resolve a lineage to one coherent set: the best variant of each disk in it,
     /// as `(disk_no, uid)` sorted by disk.
     pub fn resolve_set(&self, edition_id: i64, lineage: &str) -> Result<Vec<(u32, String)>> {
@@ -454,12 +470,22 @@ impl Vault {
     }
 
     /// Export a coherent set (best-per-disk of `lineage`) under canonical names.
+    /// Refuses an incomplete or unknown lineage — an exported set must be bootable.
     pub fn export_set(&self, edition_id: i64, lineage: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        let (dc, members) = self.gather_set(edition_id)?;
+        let complete = lineage_coverage(&members, dc)
+            .iter()
+            .any(|c| c.lineage.as_deref() == Some(lineage) && c.complete);
+        if !complete {
+            return Err(Error::Invalid(format!(
+                "lineage '{lineage}' is not a complete set"
+            )));
+        }
         let mut out = Vec::new();
-        for (_disk, uid) in self.resolve_set(edition_id, lineage)? {
-            if let Some(v) = self.db.get_artifact(&uid)? {
-                let bytes = self.store.get(&v.blob_sha1)?;
-                out.push((v.canonical_name, bytes));
+        for idx in primary_set_for_lineage(&members, lineage) {
+            let uid = &members[idx].tiebreak;
+            if let Some(v) = self.db.get_artifact(uid)? {
+                out.push((v.canonical_name.clone(), self.store.get(&v.blob_sha1)?));
             }
         }
         Ok(out)
