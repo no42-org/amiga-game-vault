@@ -37,13 +37,13 @@ RUN useradd --system --uid 10001 --create-home --home-dir /data vault
 COPY --from=builder /amiga-game-vault /usr/local/bin/amiga-game-vault
 
 ENV VAULT_DATA=/data \
-    VAULT_ADDR=0.0.0.0:8080
+    VAULT_ADDR=0.0.0.0:4500
 
 VOLUME ["/data"]
-EXPOSE 8080
+EXPOSE 4500
 USER vault
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/ >/dev/null || exit 1
+    CMD curl -fsS http://127.0.0.1:4500/ >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/amiga-game-vault"]
