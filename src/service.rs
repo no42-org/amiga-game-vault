@@ -14,16 +14,18 @@ use std::path::Path;
 
 use crate::dat::{parse_dat, DatEntry};
 use crate::db::{ArtifactView, Db, EditionView, NewArtifact};
-use crate::edition::{edition_key, interpret_flags, DumpInfo, EditionKey};
+use crate::edition::{
+    edition_key, infer_category, interpret_flags, Category, DumpInfo, EditionKey,
+};
 use crate::identity::Hashes;
 use crate::ingest::{detect_container, DiskImage, Tools};
 use crate::naming::{parse_tosec, TosecName};
 use crate::ranking::{primary_set_for_lineage, select_primary, select_primary_lineage, DiskMember};
 use crate::{Error, Result};
 
-/// A resolved identity: parsed name, interpreted dump info, and the
-/// authoritative canonical name to retain.
-type Identity = (TosecName, DumpInfo, String);
+/// A resolved identity: parsed name, interpreted dump info, the authoritative
+/// canonical name to retain, and the inferred category.
+type Identity = (TosecName, DumpInfo, String, Category);
 
 /// The outcome of ingesting one decoded ADF.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -37,6 +39,15 @@ pub enum IngestOutcome {
     },
     /// Byte-identical to an existing artifact; nothing new stored.
     Duplicate { uid: String },
+}
+
+/// The result of a re-identification pass.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReidentifyReport {
+    pub scanned: usize,
+    pub moved: usize,
+    pub editions_removed: usize,
+    pub titles_removed: usize,
 }
 
 /// Metadata supplied when a user resolves a quarantined artifact.
@@ -127,7 +138,7 @@ impl Vault {
         };
 
         match identity {
-            Some((parsed, info, canonical_name)) => {
+            Some((parsed, info, canonical_name, category)) => {
                 rec.display_title = Some(parsed.title.clone());
                 rec.year = parsed.year;
                 // Retain the authoritative canonical name: the DAT entry name when
@@ -136,7 +147,7 @@ impl Vault {
                 apply_dump_info(&mut rec, &info);
 
                 let key = edition_key(&parsed);
-                let edition_id = self.ensure_edition("game", &key)?;
+                let edition_id = self.ensure_edition(category.as_str(), &key)?;
                 rec.edition_id = Some(edition_id);
                 self.db.insert_artifact(&rec)?;
                 self.recompute_set_primaries(edition_id)?;
@@ -168,11 +179,13 @@ impl Vault {
             // Authoritative: build identity from the DAT's canonical name.
             let parsed = parse_tosec(&entry.name).unwrap_or_else(|| dat_to_name(&entry));
             let info = interpret_flags(&parsed.flags);
-            return Ok((Some((parsed, info, entry.name)), true));
+            let category = infer_category(parsed.qualifier.as_deref(), Some(&entry.source));
+            return Ok((Some((parsed, info, entry.name, category)), true));
         }
         if let Some(parsed) = parse_tosec(name) {
             let info = interpret_flags(&parsed.flags);
-            return Ok((Some((parsed, info, name.to_string())), false));
+            let category = infer_category(parsed.qualifier.as_deref(), None);
+            return Ok((Some((parsed, info, name.to_string(), category)), false));
         }
         Ok((None, false))
     }
@@ -277,6 +290,7 @@ impl Vault {
             version: meta.version.clone(),
             language: meta.language.clone(),
             publisher: meta.publisher.clone(),
+            qualifier: None,
             disk_no: meta.disk_no,
             disk_count: meta.disk_count,
         };
@@ -291,6 +305,61 @@ impl Vault {
         self.db.dequarantine(uid)?;
         self.recompute_set_primaries(edition_id)?;
         Ok(())
+    }
+
+    /// Re-identify all named artifacts from their retained TOSEC name: recompute
+    /// category/qualifier/publisher, re-group into the correct Title/Edition, fix
+    /// primaries, and drop Editions/Titles left empty. Non-destructive and
+    /// idempotent; artifacts without a TOSEC name are skipped.
+    pub fn reidentify(&self) -> Result<ReidentifyReport> {
+        use std::collections::BTreeSet;
+        let named = self.db.all_artifacts_named()?;
+        let scanned = named.len();
+        let mut moved = 0;
+        let mut affected: BTreeSet<i64> = BTreeSet::new();
+
+        for (uid, tosec) in named {
+            let Some(parsed) = parse_tosec(&tosec) else {
+                continue;
+            };
+            // The name only gives a definitive demo signal; the DAT-source signal
+            // used at ingest isn't stored per artifact. So only *upgrade* to demo
+            // from the name, and otherwise preserve the artifact's current
+            // category rather than downgrading a DAT-classified tool/demo to game.
+            let category = match infer_category(parsed.qualifier.as_deref(), None) {
+                Category::Demo => Category::Demo,
+                _ => match self.db.artifact_category(&uid)?.as_deref() {
+                    Some("tool") => Category::Tool,
+                    Some("demo") => Category::Demo,
+                    _ => Category::Game,
+                },
+            };
+            let new_ed = self.ensure_edition(category.as_str(), &edition_key(&parsed))?;
+            let old = self.db.artifact_edition(&uid)?;
+            if old != Some(new_ed) {
+                self.db.set_artifact_edition(&uid, new_ed)?;
+                if let Some(o) = old {
+                    affected.insert(o);
+                }
+                affected.insert(new_ed);
+                moved += 1;
+            }
+        }
+
+        // Fix primaries on every touched Edition (rows still exist here)...
+        for ed in &affected {
+            self.recompute_set_primaries(*ed)?;
+        }
+        // ...then drop the now-empty Editions and Titles.
+        let editions_removed = self.db.delete_empty_editions()?;
+        let titles_removed = self.db.delete_empty_titles()?;
+
+        Ok(ReidentifyReport {
+            scanned,
+            moved,
+            editions_removed,
+            titles_removed,
+        })
     }
 
     /// Re-flag which artifact is an Edition's primary (non-destructive).
@@ -334,6 +403,7 @@ fn dat_to_name(entry: &DatEntry) -> TosecName {
         year: entry.year,
         disk_no: entry.disk_no,
         disk_count: entry.disk_count,
+        qualifier: None,
         flags: Vec::new(),
     }
 }
@@ -383,5 +453,106 @@ mod tests {
             }
         ));
         assert_eq!(v.quarantine_list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reidentify_heals_mislabeled_demo_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = Vault::open_memory(dir.path()).unwrap();
+
+        // Simulate OLD-style ingest: filed as `game` with the demo token as the
+        // publisher (the exact defect this change fixes).
+        let title_id = v.db.upsert_title("Agony", "game").unwrap();
+        let key = EditionKey {
+            title: "Agony".into(),
+            version: None,
+            language: None,
+            publisher: Some("demo-playable".into()),
+            qualifier: None,
+            disk_no: None,
+            disk_count: None,
+        };
+        let old_ed = v.db.upsert_edition(title_id, &key).unwrap();
+        let rec = NewArtifact {
+            uid: "deadbeef01".into(),
+            hashes: Hashes {
+                sha1: "sha_agony_demo".into(),
+                crc32: "c".into(),
+                md5: "m".into(),
+            },
+            edition_id: Some(old_ed),
+            display_title: Some("Agony".into()),
+            tosec_name: Some("Agony (demo-playable) (1991)(Psygnosis)[h PRD].adf".into()),
+            container: "adf".into(),
+            blob_sha1: "sha_agony_demo".into(),
+            ..Default::default()
+        };
+        v.db.insert_artifact(&rec).unwrap();
+        v.db.set_primary(old_ed, Some("deadbeef01")).unwrap();
+
+        let rep = v.reidentify().unwrap();
+        assert_eq!(rep.moved, 1);
+        assert!(rep.editions_removed >= 1 && rep.titles_removed >= 1);
+
+        // Now a demo Title with the real publisher and qualifier; the game Title is gone.
+        let demo = v.browse(Some("Agony"), Some("demo"), None, None).unwrap();
+        assert_eq!(demo.len(), 1);
+        assert_eq!(demo[0].publisher.as_deref(), Some("Psygnosis"));
+        assert_eq!(demo[0].qualifier.as_deref(), Some("demo-playable"));
+        assert!(v
+            .browse(Some("Agony"), Some("game"), None, None)
+            .unwrap()
+            .is_empty());
+
+        // Idempotent: a second pass moves nothing.
+        assert_eq!(v.reidentify().unwrap().moved, 0);
+    }
+
+    #[test]
+    fn reidentify_preserves_dat_categorized_tool() {
+        // A tool categorized via a DAT source at ingest (no qualifier in the
+        // name) must not be downgraded to `game` by re-identify.
+        let dir = tempfile::tempdir().unwrap();
+        let v = Vault::open_memory(dir.path()).unwrap();
+        let title_id = v.db.upsert_title("DiskMaster", "tool").unwrap();
+        let key = EditionKey {
+            title: "DiskMaster".into(),
+            version: None,
+            language: None,
+            publisher: Some("SomeCorp".into()),
+            qualifier: None,
+            disk_no: None,
+            disk_count: None,
+        };
+        let ed = v.db.upsert_edition(title_id, &key).unwrap();
+        let rec = NewArtifact {
+            uid: "toolaaaa01".into(),
+            hashes: Hashes {
+                sha1: "sha_tool".into(),
+                crc32: "c".into(),
+                md5: "m".into(),
+            },
+            edition_id: Some(ed),
+            display_title: Some("DiskMaster".into()),
+            tosec_name: Some("DiskMaster (1990)(SomeCorp).adf".into()),
+            container: "adf".into(),
+            blob_sha1: "sha_tool".into(),
+            ..Default::default()
+        };
+        v.db.insert_artifact(&rec).unwrap();
+        v.db.set_primary(ed, Some("toolaaaa01")).unwrap();
+
+        let rep = v.reidentify().unwrap();
+        assert_eq!(rep.moved, 0, "category preserved, nothing to move");
+        assert_eq!(
+            v.browse(Some("DiskMaster"), Some("tool"), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(v
+            .browse(Some("DiskMaster"), Some("game"), None, None)
+            .unwrap()
+            .is_empty());
     }
 }

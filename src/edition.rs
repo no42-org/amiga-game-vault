@@ -48,6 +48,47 @@ impl DumpType {
     }
 }
 
+/// The category of a Title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Game,
+    Tool,
+    Demo,
+}
+
+impl Category {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Category::Game => "game",
+            Category::Tool => "tool",
+            Category::Demo => "demo",
+        }
+    }
+}
+
+/// True when a qualifier denotes a demo release.
+fn qualifier_is_demo(q: &str) -> bool {
+    q.contains("demo") || q == "preview"
+}
+
+/// Infer a Title's category: a demo qualifier wins, then a DAT source that
+/// denotes demos/tools, else `Game`.
+pub fn infer_category(qualifier: Option<&str>, dat_source: Option<&str>) -> Category {
+    if qualifier.map(qualifier_is_demo).unwrap_or(false) {
+        return Category::Demo;
+    }
+    if let Some(src) = dat_source {
+        let s = src.to_ascii_lowercase();
+        if s.contains("demo") {
+            return Category::Demo;
+        }
+        if s.contains("application") || s.contains("tool") || s.contains("util") {
+            return Category::Tool;
+        }
+    }
+    Category::Game
+}
+
 /// Interpreted scene attributes for a single artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DumpInfo {
@@ -182,6 +223,7 @@ pub struct EditionKey {
     pub version: Option<String>,
     pub language: Option<String>,
     pub publisher: Option<String>,
+    pub qualifier: Option<String>,
     pub disk_no: Option<u32>,
     pub disk_count: Option<u32>,
 }
@@ -193,6 +235,7 @@ pub fn edition_key(name: &TosecName) -> EditionKey {
         version: name.version.clone(),
         language: name.language.clone(),
         publisher: name.publisher.clone(),
+        qualifier: name.qualifier.clone(),
         disk_no: name.disk_no,
         disk_count: name.disk_count,
     }
@@ -206,6 +249,7 @@ pub fn set_key(name: &TosecName) -> EditionKey {
         version: name.version.clone(),
         language: name.language.clone(),
         publisher: name.publisher.clone(),
+        qualifier: name.qualifier.clone(),
         disk_no: None,
         disk_count: name.disk_count,
     }
@@ -282,6 +326,41 @@ mod tests {
         let groups = group_by_edition(&names);
         assert_eq!(groups.len(), 1, "all A-10 disk-1 variants are one Edition");
         assert_eq!(groups.values().next().unwrap().len(), names.len());
+    }
+
+    #[test]
+    fn category_inference() {
+        assert_eq!(infer_category(Some("demo-playable"), None), Category::Demo);
+        assert_eq!(infer_category(Some("preview"), None), Category::Demo);
+        assert_eq!(infer_category(None, Some("Amiga - Demos")), Category::Demo);
+        assert_eq!(
+            infer_category(None, Some("Amiga - Applications")),
+            Category::Tool
+        );
+        assert_eq!(infer_category(None, Some("TOSEC")), Category::Game);
+        assert_eq!(infer_category(None, None), Category::Game);
+    }
+
+    #[test]
+    fn distinct_qualifiers_do_not_merge() {
+        let names: Vec<TosecName> = [
+            "Agony (demo-playable) (1991)(Psygnosis).adf",
+            "Agony (demo-rolling) (1991)(Psygnosis).adf",
+            "Agony (demo-rolling) (1991)(Psygnosis)[h TRSI].adf",
+        ]
+        .iter()
+        .map(|s| p(s))
+        .collect();
+        let groups = group_by_edition(&names);
+        assert_eq!(
+            groups.len(),
+            2,
+            "playable and rolling demos are two Editions"
+        );
+        // Publisher preserved, not eaten by the demo token.
+        assert!(names
+            .iter()
+            .all(|n| n.publisher.as_deref() == Some("Psygnosis")));
     }
 
     #[test]

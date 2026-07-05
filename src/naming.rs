@@ -22,6 +22,9 @@ pub struct TosecName {
     pub year: Option<i32>,
     pub disk_no: Option<u32>,
     pub disk_count: Option<u32>,
+    /// A variant qualifier parsed from a parenthesized group, e.g. `"demo-playable"`.
+    /// Distinct from `publisher`, which it must not consume.
+    pub qualifier: Option<String>,
     /// Raw bracket contents, e.g. `"cr QTX"`, `"t +9 TLPI"`, `"a2 highscore"`, `"b corrupt file"`.
     pub flags: Vec<String>,
 }
@@ -32,9 +35,31 @@ const LANG_CODES: &[&str] = &[
     "us", "uk", "au", "jp", "mul",
 ];
 
+/// Known variant qualifier tokens (case-insensitive). These denote a specific
+/// release variant (mostly demos) and must not be mistaken for the publisher.
+const QUALIFIER_TOKENS: &[&str] = &[
+    "demo",
+    "demo-playable",
+    "demo-rolling",
+    "demo-slideshow",
+    "demo-kus",
+    "playable demo",
+    "rolling demo",
+    "preview",
+    "prerelease",
+    "proto",
+    "prototype",
+];
+
 fn is_lang_token(t: &str) -> bool {
     let lower = t.to_ascii_lowercase();
     LANG_CODES.contains(&lower.as_str())
+}
+
+/// If `t` is a known qualifier token, return its normalized (lowercase) form.
+fn qualifier_of(t: &str) -> Option<String> {
+    let lower = t.to_ascii_lowercase();
+    QUALIFIER_TOKENS.contains(&lower.as_str()).then_some(lower)
 }
 
 /// Parse a TOSEC-style filename (with or without extension) into its fields.
@@ -82,6 +107,11 @@ pub fn parse_tosec(filename: &str) -> Option<TosecName> {
             out.year = Some(y);
         } else if is_lang_token(content) {
             out.language = Some(content.to_ascii_lowercase());
+        } else if let Some(q) = qualifier_of(content) {
+            // A variant qualifier — keep it out of the publisher slot.
+            if out.qualifier.is_none() {
+                out.qualifier = Some(q);
+            }
         } else if out.publisher.is_none() {
             out.publisher = Some(content.to_string());
         }
@@ -325,6 +355,30 @@ mod tests {
         let us = parse_tosec("Monkey Island 2 - LeChuck's Revenge v1.0 (1992)(LucasArts - U.S. Gold)(Disk 1 of 11)[cr DTC].adf").unwrap();
         assert_eq!(us.language, None); // implicit English -> no lang token
         assert_eq!(us.publisher.as_deref(), Some("LucasArts - U.S. Gold"));
+    }
+
+    #[test]
+    fn qualifier_frees_the_publisher_slot() {
+        let n = parse_tosec("Agony (demo-playable) (1991)(Psygnosis)[h PRD].adf").unwrap();
+        assert_eq!(n.title, "Agony");
+        assert_eq!(n.qualifier.as_deref(), Some("demo-playable"));
+        assert_eq!(n.publisher.as_deref(), Some("Psygnosis"));
+        assert_eq!(n.year, Some(1991));
+    }
+
+    #[test]
+    fn no_qualifier_keeps_publisher_first() {
+        let n = parse_tosec("Agony (1992)(Psygnosis)(Disk 1 of 3)[cr CSL].adf").unwrap();
+        assert_eq!(n.qualifier, None);
+        assert_eq!(n.publisher.as_deref(), Some("Psygnosis"));
+        assert_eq!(n.disk_count, Some(3));
+    }
+
+    #[test]
+    fn unknown_group_still_becomes_publisher() {
+        let n = parse_tosec("Whatever (SomeGroup)(1990).adf").unwrap();
+        assert_eq!(n.qualifier, None);
+        assert_eq!(n.publisher.as_deref(), Some("SomeGroup"));
     }
 
     #[test]

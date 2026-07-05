@@ -218,3 +218,62 @@ fn multidisk_set_picks_one_coherent_lineage() {
         );
     }
 }
+
+#[test]
+fn agony_demos_and_game_are_categorized_and_distinct() {
+    // The real screenshot case: the 3-disk full game plus 1991 playable/rolling
+    // demos. Demos become category `demo` with publisher `Psygnosis` preserved,
+    // and the two demo types stay distinct via their qualifier.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+
+    for n in [
+        "Agony (demo-playable) (1991)(Psygnosis)[h PRD].adf",
+        "Agony (demo-rolling) (1991)(Psygnosis).adf",
+        "Agony (demo-rolling) (1991)(Psygnosis)[h TRSI].adf",
+        "Agony (1992)(Psygnosis)(Disk 1 of 3)[cr CSL].adf",
+    ] {
+        ingest(&vault, n);
+    }
+
+    let eds = vault.browse(Some("Agony"), None, None, None).unwrap();
+    assert_eq!(
+        eds.len(),
+        3,
+        "playable demo, rolling demo, and the game disk"
+    );
+
+    let demos: Vec<_> = eds.iter().filter(|e| e.category == "demo").collect();
+    assert_eq!(demos.len(), 2, "two demo editions");
+    assert!(
+        demos
+            .iter()
+            .all(|e| e.publisher.as_deref() == Some("Psygnosis")),
+        "publisher restored, not eaten by the demo token"
+    );
+    let mut quals: Vec<_> = demos.iter().filter_map(|e| e.qualifier.clone()).collect();
+    quals.sort();
+    assert_eq!(quals, vec!["demo-playable", "demo-rolling"]);
+
+    let game: Vec<_> = eds.iter().filter(|e| e.category == "game").collect();
+    assert_eq!(game.len(), 1);
+    assert_eq!(game[0].disk_no, Some(1));
+    assert_eq!(game[0].disk_count, Some(3));
+    assert_eq!(game[0].publisher.as_deref(), Some("Psygnosis"));
+
+    // The category filter is now meaningful.
+    assert_eq!(
+        vault
+            .browse(Some("Agony"), Some("demo"), None, None)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        vault
+            .browse(Some("Agony"), Some("game"), None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+}

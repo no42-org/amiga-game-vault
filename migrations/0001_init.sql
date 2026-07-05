@@ -17,10 +17,11 @@ CREATE TABLE IF NOT EXISTS edition (
     version              TEXT,
     language             TEXT,
     publisher            TEXT,
+    qualifier            TEXT,   -- variant qualifier (e.g. demo-playable); part of the key
     disk_no              INTEGER,
     disk_count           INTEGER,
     primary_artifact_uid TEXT,
-    UNIQUE (title_id, version, language, publisher, disk_no, disk_count)
+    UNIQUE (title_id, version, language, publisher, qualifier, disk_no, disk_count)
 );
 
 -- Artifact: the specific bytes held, keyed by content-derived UID (sha1[:10]).

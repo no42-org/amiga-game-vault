@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/upload", post(upload))
         .route("/api/import-dat", post(import_dat))
         .route("/api/quarantine", get(quarantine))
+        .route("/api/reidentify", post(reidentify))
         .route("/api/quarantine/{uid}/resolve", post(resolve))
         .route("/download/{uid}", get(download))
         .route("/export/edition/{id}", get(export_edition))
@@ -154,6 +155,11 @@ async fn quarantine(State(state): State<AppState>) -> Result<Json<serde_json::Va
     Ok(Json(
         serde_json::json!({ "quarantine": v.quarantine_list()? }),
     ))
+}
+
+async fn reidentify(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppErr> {
+    let v = lock(&state);
+    Ok(Json(serde_json::to_value(v.reidentify()?).unwrap()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,6 +346,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
       <option value="verified">verified</option><option value="unverified">unverified</option></select>
     <button onclick="load()">Search</button>
     <a href="#" onclick="loadQuarantine();return false">Quarantine</a>
+    <a href="#" onclick="reidentify();return false">Re-identify</a>
     <span style="flex:1"></span>
     <button onclick="document.getElementById('filePick').click()">Upload files</button>
     <button onclick="document.getElementById('dirPick').click()">Upload folder</button>
@@ -365,9 +372,13 @@ async function load() {
   for (const e of editions) {
     const div = document.createElement('div');
     div.className = 'edition';
-    const lang = e.language ? ' · ' + e.language : '';
-    const disk = e.disk_no ? ` · disk ${e.disk_no} of ${e.disk_count}` : '';
-    div.innerHTML = `<div class="title">${esc(e.title)} <span class="meta">${e.category}${lang}${disk}</span></div>
+    const bits = [e.category];
+    if (e.qualifier) bits.push(esc(e.qualifier));
+    if (e.publisher) bits.push(esc(e.publisher));
+    if (e.year) bits.push(e.year);
+    if (e.language) bits.push(e.language);
+    if (e.disk_no) bits.push(`disk ${e.disk_no} of ${e.disk_count}`);
+    div.innerHTML = `<div class="title">${esc(e.title)} <span class="meta">${bits.join(' · ')}</span></div>
       <div class="meta">${e.variant_count} variant(s)` +
       (e.primary_uid ? ` · primary <code>${e.primary_uid}</code>` : '') +
       ` · <a href="/export/edition/${e.edition_id}">export</a></div>
@@ -401,6 +412,14 @@ async function loadQuarantine() {
       · <a href="/download/${v.uid}">download</a></div>`;
     list.appendChild(div);
   }
+}
+async function reidentify() {
+  const rep = await (await fetch('/api/reidentify', { method: 'POST' })).json();
+  await load();
+  const note = document.createElement('p');
+  note.className = 'meta';
+  note.textContent = `Re-identified — scanned ${rep.scanned}, moved ${rep.moved}, removed ${rep.editions_removed} edition(s) / ${rep.titles_removed} title(s).`;
+  document.getElementById('list').prepend(note);
 }
 function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
