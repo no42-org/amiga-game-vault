@@ -29,6 +29,9 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/logo.png", get(logo))
         .route("/api/editions", get(editions))
+        .route("/api/sets", get(sets))
+        .route("/api/sets/{id}/lineages", get(set_lineages))
+        .route("/export/set/{id}/{lineage}", get(export_set))
         .route("/api/editions/{id}/variants", get(variants))
         .route("/api/editions/{id}/primary", post(set_primary))
         .route("/api/artifact/{uid}", get(artifact))
@@ -106,6 +109,63 @@ async fn variants(
 ) -> Result<Json<serde_json::Value>, AppErr> {
     let v = lock(&state);
     Ok(Json(serde_json::json!({ "variants": v.variants(id)? })))
+}
+
+async fn sets(
+    State(state): State<AppState>,
+    Query(p): Query<BrowseParams>,
+) -> Result<Json<serde_json::Value>, AppErr> {
+    let v = lock(&state);
+    let incomplete = p.status.as_deref() == Some("incomplete");
+    let rows = v.list_sets(
+        p.q.as_deref(),
+        p.category.as_deref(),
+        p.language.as_deref(),
+        incomplete,
+    )?;
+    Ok(Json(serde_json::json!({ "sets": rows })))
+}
+
+async fn set_lineages(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, AppErr> {
+    let v = lock(&state);
+    let disks: Vec<serde_json::Value> = v
+        .set_disks(id)?
+        .into_iter()
+        .map(|(disk_no, edition_id)| serde_json::json!({ "disk_no": disk_no, "edition_id": edition_id }))
+        .collect();
+    Ok(Json(serde_json::json!({
+        "lineages": v.set_lineages(id)?,
+        "disks": disks,
+    })))
+}
+
+async fn export_set(
+    State(state): State<AppState>,
+    Path((id, lineage)): Path<(i64, String)>,
+) -> Result<Response, AppErr> {
+    let files = {
+        let v = lock(&state);
+        v.export_set(id, &lineage)?
+    };
+    let safe: String = lineage
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let zip = build_zip(&files)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"set-{id}-{safe}.zip\""),
+            ),
+        ],
+        zip,
+    )
+        .into_response())
 }
 
 async fn artifact(
@@ -342,8 +402,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <select id="category"><option value="">all categories</option>
       <option>game</option><option>tool</option><option>demo</option></select>
     <input id="language" placeholder="lang (en, es…)" size="8">
-    <select id="status"><option value="">any status</option>
-      <option value="verified">verified</option><option value="unverified">unverified</option></select>
+    <select id="status"><option value="">all sets</option>
+      <option value="incomplete">incomplete sets</option></select>
     <button onclick="load()">Search</button>
     <a href="#" onclick="loadQuarantine();return false">Quarantine</a>
     <a href="#" onclick="reidentify();return false">Re-identify</a>
@@ -365,39 +425,75 @@ async function load() {
     const val = document.getElementById(k).value.trim();
     if (val) p.set(k, val);
   }
-  const r = await fetch('/api/editions?' + p);
-  const { editions } = await r.json();
+  const { sets } = await (await fetch('/api/sets?' + p)).json();
   const list = document.getElementById('list');
-  list.innerHTML = editions.length ? '' : '<p class=meta>No editions yet. Use "Upload files"/"Upload folder" above, or drag ADFs onto the page.</p>';
-  for (const e of editions) {
+  list.innerHTML = sets.length ? '' : '<p class=meta>Nothing here. Use "Upload files"/"Upload folder" above, or drag ADFs onto the page.</p>';
+  for (const s of sets) {
     const div = document.createElement('div');
     div.className = 'edition';
-    const bits = [e.category];
-    if (e.qualifier) bits.push(esc(e.qualifier));
-    if (e.publisher) bits.push(esc(e.publisher));
-    if (e.year) bits.push(e.year);
-    if (e.language) bits.push(e.language);
-    if (e.disk_no) bits.push(`disk ${e.disk_no} of ${e.disk_count}`);
-    div.innerHTML = `<div class="title">${esc(e.title)} <span class="meta">${bits.join(' · ')}</span></div>
-      <div class="meta">${e.variant_count} variant(s)` +
-      (e.primary_uid ? ` · primary <code>${e.primary_uid}</code>` : '') +
-      ` · <a href="/export/edition/${e.edition_id}">export</a></div>
-      <div class="variants" id="v${e.edition_id}"></div>`;
+    const bits = [s.category];
+    if (s.qualifier) bits.push(esc(s.qualifier));
+    if (s.publisher) bits.push(esc(s.publisher));
+    if (s.year) bits.push(s.year);
+    if (s.language) bits.push(s.language);
+    let sub;
+    if (s.multi) {
+      const have = s.disks_present.length, need = s.disk_count || have;
+      bits.push(`${have}/${need} disks`);
+      sub = s.complete_lineages > 0
+        ? `<span class="primary">${s.complete_lineages} complete set(s)</span>` + (s.primary_lineage ? ` · ★ ${esc(s.primary_lineage)}` : '')
+        : `<span class="s-rejected">no complete set — missing a disk</span>`;
+    } else {
+      sub = `${s.variant_count} variant(s) · <a href="/export/edition/${s.rep_edition_id}">export</a>`;
+    }
+    div.innerHTML = `<div class="title">${esc(s.title)} <span class="meta">${bits.join(' · ')}</span></div>
+      <div class="meta">${sub}</div>
+      <div class="variants" id="v${s.rep_edition_id}"></div>`;
     div.querySelector('.title').style.cursor = 'pointer';
-    div.querySelector('.title').onclick = () => toggle(e.edition_id);
+    div.querySelector('.title').onclick = () => toggle(s.rep_edition_id, s.multi);
     list.appendChild(div);
   }
 }
-async function toggle(id) {
+async function toggle(id, multi) {
   const box = document.getElementById('v' + id);
   box.classList.toggle('open');
   if (box.dataset.loaded) return;
-  const r = await fetch(`/api/editions/${id}/variants`);
-  const { variants } = await r.json();
-  box.innerHTML = variants.map(v => `<div class="variant">
+  box.innerHTML = multi ? await renderLineages(id) : await renderVariants(id);
+  box.dataset.loaded = '1';
+}
+async function renderVariants(id) {
+  const { variants } = await (await fetch(`/api/editions/${id}/variants`)).json();
+  return variants.map(v => `<div class="variant">
       <span class="${v.is_primary ? 'primary' : ''}">${v.is_primary ? '★ ' : ''}<code>${esc(v.canonical_name)}</code></span>
       <span class="meta">${v.dump_type || '?'}${v.crack_group ? ' · ' + esc(v.crack_group) : ''}${v.verified ? ' · verified' : ''}
         · <a href="/download/${v.uid}">download</a></span></div>`).join('');
+}
+async function renderLineages(id) {
+  const { lineages, disks } = await (await fetch(`/api/sets/${id}/lineages`)).json();
+  // Disks section — always reachable, even when no lineage is complete.
+  const diskRows = (disks || []).map(d => `<div class="variant">
+      <span style="cursor:pointer" onclick="expandDisk(${d.edition_id})">Disk ${d.disk_no} ▸</span>
+      <span class="meta"><a href="/export/edition/${d.edition_id}">export disk</a></span></div>
+    <div class="variants" id="dv${d.edition_id}"></div>`).join('');
+  const linRows = lineages.map(l => {
+    const name = l.lineage ? esc(l.lineage) : '(no group)';
+    const badge = l.complete
+      ? '<span class="primary">complete</span>'
+      : `<span class="s-rejected">disks ${l.disks_covered.join(',')}</span>`;
+    const exp = (l.complete && l.lineage)
+      ? ` · <a href="/export/set/${id}/${encodeURIComponent(l.lineage)}">export set</a>` : '';
+    return `<div class="variant">
+      <span class="${l.is_primary ? 'primary' : ''}">${l.is_primary ? '★ ' : ''}<code>${name}</code></span>
+      <span class="meta">${badge}${exp}</span></div>`;
+  }).join('');
+  return `<div class="meta" style="margin:2px 0">Disks</div>${diskRows}` +
+    `<div class="meta" style="margin:6px 0 2px">Coherent sets</div>${linRows}`;
+}
+async function expandDisk(ed) {
+  const box = document.getElementById('dv' + ed);
+  box.classList.toggle('open');
+  if (box.dataset.loaded) return;
+  box.innerHTML = await renderVariants(ed);
   box.dataset.loaded = '1';
 }
 async function loadQuarantine() {

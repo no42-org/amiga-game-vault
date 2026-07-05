@@ -86,6 +86,56 @@ pub fn select_primary_lineage(members: &[DiskMember], disk_count: u32) -> Option
     best.map(|(_, _, _, tag)| tag)
 }
 
+/// A candidate lineage of a Set: which disks it covers and whether it is complete.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LineageCoverage {
+    /// The crack/hack group; `None` for the no-group/orphan lineage.
+    pub lineage: Option<String>,
+    /// Disk numbers this lineage covers, ascending.
+    pub disks_covered: Vec<u32>,
+    /// Covers every disk `1..=disk_count`.
+    pub complete: bool,
+    /// The lineage the vault auto-selects as the coherent primary set.
+    pub is_primary: bool,
+}
+
+/// Enumerate every candidate lineage of a set with its coverage, sorted best-first
+/// (complete before partial, then by the primary-selection ranking). Disqualified
+/// members do not count toward coverage — a bad-dump disk does not complete a set.
+pub fn lineage_coverage(members: &[DiskMember], disk_count: u32) -> Vec<LineageCoverage> {
+    let mut by: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, m) in members.iter().enumerate() {
+        if m.info.disqualified() {
+            continue;
+        }
+        by.entry(m.lineage.clone().unwrap_or_default())
+            .or_default()
+            .push(i);
+    }
+    // (not_complete, MAX-coverage, sum_mods, tag) — same key as select_primary_lineage,
+    // so the first row after sorting is the auto-primary lineage.
+    let mut scored: Vec<(bool, usize, u32, String, LineageCoverage)> = Vec::new();
+    for (tag, idxs) in &by {
+        let disks: BTreeSet<u32> = idxs.iter().map(|&i| members[i].disk_no).collect();
+        let coverage = disks.len();
+        let complete = disk_count == 0 || (1..=disk_count).all(|d| disks.contains(&d));
+        let sum_mods: u32 = idxs.iter().map(|&i| members[i].info.modifications).sum();
+        let cov = LineageCoverage {
+            lineage: (!tag.is_empty()).then(|| tag.clone()),
+            disks_covered: disks.into_iter().collect(),
+            complete,
+            is_primary: false,
+        };
+        scored.push((!complete, usize::MAX - coverage, sum_mods, tag.clone(), cov));
+    }
+    scored.sort_by(|a, b| (a.0, a.1, a.2, &a.3).cmp(&(b.0, b.1, b.2, &b.3)));
+    let mut out: Vec<LineageCoverage> = scored.into_iter().map(|t| t.4).collect();
+    if let Some(first) = out.first_mut() {
+        first.is_primary = true;
+    }
+    out
+}
+
 /// Pick the best non-disqualified member of a given lineage for each disk.
 pub fn primary_set_for_lineage(members: &[DiskMember], lineage: &str) -> Vec<usize> {
     let mut by_disk: BTreeMap<u32, usize> = BTreeMap::new();
@@ -233,5 +283,47 @@ mod tests {
             3,
             "primary set spans all three disks of one lineage"
         );
+    }
+
+    #[test]
+    fn lineage_coverage_enumerates_complete_and_partial() {
+        let mut members = Vec::new();
+        let mut push = |disk: u32, lin: &str, tag: &str| {
+            members.push(DiskMember {
+                disk_no: disk,
+                lineage: Some(lin.into()),
+                info: info(&format!("Agony (1992)(P)(Disk {disk} of 3)[cr {lin}].adf")),
+                tiebreak: tag.into(),
+            });
+        };
+        // Bobic: complete (a plain crack, fewest mods → the auto-primary)
+        for d in 1..=3 {
+            push(d, "Bobic", &format!("bobic{d}"));
+        }
+        // CSL: complete, with several variants on disk 1
+        for d in 1..=3 {
+            push(d, "CSL", &format!("csl{d}"));
+        }
+        push(1, "CSL", "csl1b");
+        push(1, "CSL", "csl1c");
+        // A-Team: partial — missing disk 3
+        push(1, "A-Team", "at1");
+        push(2, "A-Team", "at2");
+
+        let cov = lineage_coverage(&members, 3);
+        let by: std::collections::HashMap<_, _> = cov
+            .iter()
+            .map(|c| (c.lineage.clone().unwrap(), c))
+            .collect();
+
+        assert!(by["Bobic"].complete && by["CSL"].complete);
+        assert!(!by["A-Team"].complete);
+        assert_eq!(by["A-Team"].disks_covered, vec![1, 2]);
+        // Complete lineages sort before the partial one.
+        assert!(cov.last().unwrap().lineage.as_deref() == Some("A-Team"));
+        // Exactly one lineage is marked the auto-primary, and it is complete.
+        let primaries: Vec<_> = cov.iter().filter(|c| c.is_primary).collect();
+        assert_eq!(primaries.len(), 1);
+        assert!(primaries[0].complete);
     }
 }

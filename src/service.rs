@@ -20,7 +20,10 @@ use crate::edition::{
 use crate::identity::Hashes;
 use crate::ingest::{detect_container, DiskImage, Tools};
 use crate::naming::{parse_tosec, TosecName};
-use crate::ranking::{primary_set_for_lineage, select_primary, select_primary_lineage, DiskMember};
+use crate::ranking::{
+    lineage_coverage, primary_set_for_lineage, select_primary, select_primary_lineage, DiskMember,
+    LineageCoverage,
+};
 use crate::{Error, Result};
 
 /// A resolved identity: parsed name, interpreted dump info, the authoritative
@@ -39,6 +42,26 @@ pub enum IngestOutcome {
     },
     /// Byte-identical to an existing artifact; nothing new stored.
     Duplicate { uid: String },
+}
+
+/// A release (Set): the disks that form one game, rolled up from the Editions
+/// sharing a set key. `multi` is false for a trivial single-disk title.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SetView {
+    pub rep_edition_id: i64,
+    pub multi: bool,
+    pub title: String,
+    pub category: String,
+    pub publisher: Option<String>,
+    pub year: Option<i32>,
+    pub version: Option<String>,
+    pub language: Option<String>,
+    pub qualifier: Option<String>,
+    pub disk_count: Option<u32>,
+    pub disks_present: Vec<u32>,
+    pub complete_lineages: usize,
+    pub primary_lineage: Option<String>,
+    pub variant_count: i64,
 }
 
 /// The result of a re-identification pass.
@@ -305,6 +328,167 @@ impl Vault {
         self.db.dequarantine(uid)?;
         self.recompute_set_primaries(edition_id)?;
         Ok(())
+    }
+
+    // --- Sets (releases) --------------------------------------------------
+
+    /// Gather every disk member of the Set that `edition_id` belongs to (with the
+    /// set's disk count). Reuses the stored `lineage`.
+    fn gather_set(&self, edition_id: i64) -> Result<(u32, Vec<DiskMember>)> {
+        let (disk_count, siblings) = self.db.set_siblings(edition_id)?;
+        let mut members = Vec::new();
+        for (ed_id, disk_no) in &siblings {
+            for (uid, info) in self.db.edition_variant_infos(*ed_id)? {
+                members.push(DiskMember {
+                    // A single-disk release with no "Disk N" is its own disk 1.
+                    disk_no: disk_no.unwrap_or(1),
+                    lineage: info.lineage.clone(),
+                    info,
+                    tiebreak: uid,
+                });
+            }
+        }
+        // When the release doesn't declare "of N", require covering every disk we
+        // actually hold, so a lineage that misses a present disk isn't "complete".
+        let max_present = siblings.iter().filter_map(|(_, d)| *d).max().unwrap_or(1);
+        let dc = disk_count.unwrap_or(max_present).max(1);
+        Ok((dc, members))
+    }
+
+    /// Browse releases: roll up multi-disk Editions into Sets (representative =
+    /// the lowest disk). `incomplete_only` keeps only Sets with no complete lineage.
+    pub fn list_sets(
+        &self,
+        q: Option<&str>,
+        category: Option<&str>,
+        language: Option<&str>,
+        incomplete_only: bool,
+    ) -> Result<Vec<SetView>> {
+        use std::collections::BTreeMap;
+        type Key = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<u32>,
+        );
+        let mut groups: BTreeMap<Key, Vec<EditionView>> = BTreeMap::new();
+        for e in self.db.browse(q, category, language, None)? {
+            let key = (
+                e.title.clone(),
+                e.category.clone(),
+                e.version.clone(),
+                e.language.clone(),
+                e.publisher.clone(),
+                e.qualifier.clone(),
+                e.disk_count,
+            );
+            groups.entry(key).or_default().push(e);
+        }
+
+        let mut sets = Vec::new();
+        for (_key, mut editions) in groups {
+            editions.sort_by_key(|e| e.disk_no.unwrap_or(0));
+            let rep = &editions[0];
+            let disk_count = rep.disk_count;
+            let multi = disk_count.is_some_and(|d| d > 1) || editions.len() > 1;
+            let mut disks_present: Vec<u32> = editions.iter().filter_map(|e| e.disk_no).collect();
+            disks_present.sort_unstable();
+            disks_present.dedup();
+            let variant_count: i64 = editions.iter().map(|e| e.variant_count).sum();
+
+            // Completeness is computed the same way for every set (so a single-disk
+            // title whose only variants are disqualified reports 0, like the
+            // multi-disk case). NOTE: this issues per-set reads on browse — cheap at
+            // the current scale; a batched aggregate is a documented follow-up.
+            let covs = self.set_lineages(rep.edition_id)?;
+            let complete_lineages = covs.iter().filter(|c| c.complete).count();
+            let primary_lineage = covs
+                .iter()
+                .find(|c| c.is_primary)
+                .and_then(|c| c.lineage.clone());
+            if incomplete_only && complete_lineages > 0 {
+                continue;
+            }
+            sets.push(SetView {
+                rep_edition_id: rep.edition_id,
+                multi,
+                title: rep.title.clone(),
+                category: rep.category.clone(),
+                publisher: rep.publisher.clone(),
+                year: rep.year,
+                version: rep.version.clone(),
+                language: rep.language.clone(),
+                qualifier: rep.qualifier.clone(),
+                disk_count,
+                disks_present,
+                complete_lineages,
+                primary_lineage,
+                variant_count,
+            });
+        }
+        sets.sort_by(|a, b| {
+            a.title
+                .cmp(&b.title)
+                .then(a.category.cmp(&b.category))
+                .then(a.qualifier.cmp(&b.qualifier))
+                .then(a.disk_count.cmp(&b.disk_count))
+        });
+        Ok(sets)
+    }
+
+    /// Candidate lineages of a Set (complete/partial coverage), best-first.
+    pub fn set_lineages(&self, edition_id: i64) -> Result<Vec<LineageCoverage>> {
+        let (dc, members) = self.gather_set(edition_id)?;
+        Ok(lineage_coverage(&members, dc))
+    }
+
+    /// The Set's disks as `(disk_no, edition_id)`, so the UI can always reach the
+    /// disks held even when no lineage is complete.
+    pub fn set_disks(&self, edition_id: i64) -> Result<Vec<(u32, i64)>> {
+        let (_, siblings) = self.db.set_siblings(edition_id)?;
+        let mut disks: Vec<(u32, i64)> = siblings
+            .into_iter()
+            .map(|(ed, dn)| (dn.unwrap_or(0), ed))
+            .collect();
+        disks.sort_by_key(|(dn, _)| *dn);
+        Ok(disks)
+    }
+
+    /// Resolve a lineage to one coherent set: the best variant of each disk in it,
+    /// as `(disk_no, uid)` sorted by disk.
+    pub fn resolve_set(&self, edition_id: i64, lineage: &str) -> Result<Vec<(u32, String)>> {
+        let (_, members) = self.gather_set(edition_id)?;
+        let mut files: Vec<(u32, String)> = primary_set_for_lineage(&members, lineage)
+            .into_iter()
+            .map(|i| (members[i].disk_no, members[i].tiebreak.clone()))
+            .collect();
+        files.sort_by_key(|(d, _)| *d);
+        Ok(files)
+    }
+
+    /// Export a coherent set (best-per-disk of `lineage`) under canonical names.
+    /// Refuses an incomplete or unknown lineage — an exported set must be bootable.
+    pub fn export_set(&self, edition_id: i64, lineage: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        let (dc, members) = self.gather_set(edition_id)?;
+        let complete = lineage_coverage(&members, dc)
+            .iter()
+            .any(|c| c.lineage.as_deref() == Some(lineage) && c.complete);
+        if !complete {
+            return Err(Error::Invalid(format!(
+                "lineage '{lineage}' is not a complete set"
+            )));
+        }
+        let mut out = Vec::new();
+        for idx in primary_set_for_lineage(&members, lineage) {
+            let uid = &members[idx].tiebreak;
+            if let Some(v) = self.db.get_artifact(uid)? {
+                out.push((v.canonical_name.clone(), self.store.get(&v.blob_sha1)?));
+            }
+        }
+        Ok(out)
     }
 
     /// Re-identify all named artifacts from their retained TOSEC name: recompute

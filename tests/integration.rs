@@ -277,3 +277,125 @@ fn agony_demos_and_game_are_categorized_and_distinct() {
         1
     );
 }
+
+#[test]
+fn agony_multi_disk_set_candidate_lineages_and_export() {
+    // A 3-disk release with two complete lineages (Bobic all-3, CSL all-3) and a
+    // partial one (A-Team missing disk 3). Verify set enumeration, coherence, and
+    // coherent export.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+
+    let mut names = vec![];
+    for d in 1..=3 {
+        names.push(format!(
+            "Agony (1992)(Psygnosis)(Disk {d} of 3)[h Bobic][HD].adf"
+        ));
+        names.push(format!(
+            "Agony (1992)(Psygnosis)(Disk {d} of 3)[cr CSL][t +9 TLPI].adf"
+        ));
+    }
+    // extra CSL variant on disk 1, and a partial A-Team (disks 1 & 2 only)
+    names.push("Agony (1992)(Psygnosis)(Disk 1 of 3)[cr CSL].adf".into());
+    names.push("Agony (1992)(Psygnosis)(Disk 1 of 3)[cr A-Team][t +5 Access].adf".into());
+    names.push("Agony (1992)(Psygnosis)(Disk 2 of 3)[cr A-Team].adf".into());
+    for n in &names {
+        ingest(&vault, n);
+    }
+
+    // One Set card, multi-disk, all 3 disks present.
+    let sets = vault
+        .list_sets(Some("Agony"), Some("game"), None, false)
+        .unwrap();
+    assert_eq!(sets.len(), 1);
+    let s = &sets[0];
+    assert!(s.multi);
+    assert_eq!(s.disk_count, Some(3));
+    assert_eq!(s.disks_present, vec![1, 2, 3]);
+    assert_eq!(s.complete_lineages, 2, "Bobic and CSL are complete");
+
+    // Candidate lineages: Bobic & CSL complete, A-Team partial (missing disk 3).
+    let cov = vault.set_lineages(s.rep_edition_id).unwrap();
+    let by = |lin: &str| {
+        cov.iter()
+            .find(|c| c.lineage.as_deref() == Some(lin))
+            .unwrap()
+    };
+    assert!(by("Bobic").complete && by("CSL").complete);
+    assert!(!by("A-Team").complete);
+    assert_eq!(by("A-Team").disks_covered, vec![1, 2]);
+    assert_eq!(cov.iter().filter(|c| c.is_primary).count(), 1);
+
+    // Resolve CSL to a coherent set: one file per disk, all CSL, never mixed.
+    let resolved = vault.resolve_set(s.rep_edition_id, "CSL").unwrap();
+    assert_eq!(
+        resolved.iter().map(|(d, _)| *d).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    for (_disk, uid) in &resolved {
+        let a = vault.get_artifact(uid).unwrap().unwrap();
+        assert!(a.tosec_name.unwrap().contains("[cr CSL]"));
+    }
+
+    // Coherent export = 3 files.
+    let files = vault.export_set(s.rep_edition_id, "CSL").unwrap();
+    assert_eq!(files.len(), 3);
+}
+
+#[test]
+fn incomplete_set_is_flagged_and_single_disk_is_trivial() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    // A 2-disk release with only disk 1 present.
+    ingest(
+        &vault,
+        "Lemmings (1991)(Psygnosis)(Disk 1 of 2)[cr QTX].adf",
+    );
+    // A single-disk title.
+    ingest(&vault, "Zool (1992)(Gremlin)[cr PDX].adf");
+
+    let all = vault.list_sets(None, None, None, false).unwrap();
+    let lem = all.iter().find(|s| s.title == "Lemmings").unwrap();
+    assert!(
+        lem.multi && lem.complete_lineages == 0,
+        "missing disk 2 => no complete set"
+    );
+    let zool = all.iter().find(|s| s.title == "Zool").unwrap();
+    assert!(!zool.multi, "single-disk title is a trivial set");
+
+    // Incomplete filter surfaces Lemmings, not the complete single-disk Zool.
+    let incomplete = vault.list_sets(None, None, None, true).unwrap();
+    assert!(incomplete.iter().any(|s| s.title == "Lemmings"));
+    assert!(!incomplete.iter().any(|s| s.title == "Zool"));
+}
+
+#[test]
+fn export_set_refuses_incomplete_lineage() {
+    // A-Team covers only disks 1 & 2 of a 3-disk set; exporting it must error
+    // rather than silently produce a partial (unbootable) zip.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    for d in 1..=3 {
+        ingest(
+            &vault,
+            &format!("Agony (1992)(Psygnosis)(Disk {d} of 3)[cr CSL].adf"),
+        );
+    }
+    ingest(
+        &vault,
+        "Agony (1992)(Psygnosis)(Disk 1 of 3)[cr A-Team].adf",
+    );
+    ingest(
+        &vault,
+        "Agony (1992)(Psygnosis)(Disk 2 of 3)[cr A-Team].adf",
+    );
+
+    let sets = vault.list_sets(Some("Agony"), None, None, false).unwrap();
+    let rep = sets[0].rep_edition_id;
+
+    // Complete lineage exports fine.
+    assert_eq!(vault.export_set(rep, "CSL").unwrap().len(), 3);
+    // Partial and unknown lineages are refused.
+    assert!(vault.export_set(rep, "A-Team").is_err());
+    assert!(vault.export_set(rep, "Nonexistent").is_err());
+}
