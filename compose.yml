@@ -1,0 +1,22 @@
+# Copyright 2026 Ronny Trommer <ronny@no42.org>
+# SPDX-License-Identifier: MIT
+
+services:
+  vault:
+    build: .
+    image: amiga-game-vault:latest
+    container_name: amiga-game-vault
+    # The app has NO authentication. This binds to all interfaces for LAN use;
+    # change to "127.0.0.1:8080:8080" to keep it host-local, or front it with a
+    # reverse proxy that adds auth/TLS before exposing it beyond a trusted LAN.
+    ports:
+      - "8080:8080"
+    environment:
+      VAULT_ADDR: "0.0.0.0:8080"
+      VAULT_DATA: "/data"
+    volumes:
+      - vault-data:/data
+    restart: unless-stopped
+
+volumes:
+  vault-data:

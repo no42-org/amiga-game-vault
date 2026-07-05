@@ -1,0 +1,9 @@
+target
+.git
+.github
+data
+*.sqlite
+*.sqlite-*
+openspec
+_bmad
+_bmad-output
