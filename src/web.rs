@@ -27,6 +27,7 @@ pub type AppState = Arc<Mutex<Vault>>;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/logo.png", get(logo))
         .route("/api/editions", get(editions))
         .route("/api/editions/{id}/variants", get(variants))
         .route("/api/editions/{id}/primary", post(set_primary))
@@ -265,6 +266,19 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+/// The application logo, embedded into the binary and served statically.
+async fn logo() -> Response {
+    const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        LOGO_PNG,
+    )
+        .into_response()
+}
+
 const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -274,7 +288,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <style>
   :root { color-scheme: dark; }
   body { font: 14px/1.5 system-ui, sans-serif; margin: 0; background: #14161a; color: #e6e8ec; }
-  header { padding: 12px 20px; background: #1c1f26; border-bottom: 1px solid #2a2e37; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 20px;
+    background: #1c1f26; border-bottom: 1px solid #2a2e37; }
+  header .logo { height: 40px; width: auto; display: block; }
   h1 { font-size: 16px; margin: 0; }
   main { padding: 16px 20px; max-width: 1000px; }
   input, select, button { font: inherit; padding: 6px 8px; background: #22262e; color: inherit;
@@ -292,7 +308,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
 </style>
 </head>
 <body>
-<header><h1>Amiga Game Vault</h1></header>
+<header>
+  <img src="/logo.png" alt="Amiga Game Vault logo" class="logo">
+  <h1>Amiga Game Vault</h1>
+</header>
 <main>
   <div class="controls">
     <input id="q" placeholder="search title…">

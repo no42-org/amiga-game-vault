@@ -11,6 +11,7 @@ FROM rust:1-bookworm AS builder
 WORKDIR /src
 COPY Cargo.toml ./
 COPY migrations ./migrations
+COPY assets ./assets
 COPY src ./src
 
 # BuildKit cache mounts keep the registry and target dir warm across rebuilds.
