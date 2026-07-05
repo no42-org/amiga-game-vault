@@ -6,13 +6,14 @@ services:
     build: .
     image: amiga-game-vault:latest
     container_name: amiga-game-vault
-    # The app has NO authentication. This binds to all interfaces for LAN use;
-    # change to "127.0.0.1:8080:8080" to keep it host-local, or front it with a
-    # reverse proxy that adds auth/TLS before exposing it beyond a trusted LAN.
+    # Default port 4500 ("A500" in leet). The app has NO authentication and this
+    # binds to all interfaces for LAN use. Override the host port to avoid a clash:
+    # VAULT_HOST_PORT=4501 docker compose up -d. For host-local only, front it with
+    # a reverse proxy (or map "127.0.0.1:${VAULT_HOST_PORT:-4500}:4500").
     ports:
-      - "8080:8080"
+      - "${VAULT_HOST_PORT:-4500}:4500"
     environment:
-      VAULT_ADDR: "0.0.0.0:8080"
+      VAULT_ADDR: "0.0.0.0:4500"
       VAULT_DATA: "/data"
     volumes:
       - vault-data:/data

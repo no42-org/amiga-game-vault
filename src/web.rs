@@ -344,13 +344,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <button onclick="document.getElementById('filePick').click()">Upload files</button>
     <button onclick="document.getElementById('dirPick').click()">Upload folder</button>
   </div>
-  <input id="filePick" type="file" multiple hidden accept=".adf,.adz,.dms,.zip">
+  <input id="filePick" type="file" multiple hidden>
   <input id="dirPick" type="file" webkitdirectory multiple hidden>
   <div id="uploadPanel" class="upload-panel" hidden></div>
   <div id="list"></div>
 </main>
 <div id="dropOverlay" class="drop-overlay">Drop ADF files or a folder to upload
-  <span class="meta">(.adf .adz .dms .zip — folder drop needs Chromium/Firefox)</span></div>
+  <span class="meta" id="dropHint"></span></div>
 <script>
 async function load() {
   const p = new URLSearchParams();
@@ -407,115 +407,124 @@ function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;'
 // --- Upload: drag-and-drop + file/folder picker ---------------------------
 const ALLOWED = ['.adf', '.adz', '.dms', '.zip'];
 const hasExt = n => ALLOWED.some(e => n.toLowerCase().endsWith(e));
+const OUT_LABELS = { stored: 'stored', duplicate: 'duplicate', quarantined: 'quarantined', rejected: 'rejected', error: 'error' };
+const fmtCounts = (t, keys, sep) => keys.filter(k => t[k]).map(k => t[k] + ' ' + OUT_LABELS[k]).join(sep);
 
-document.getElementById('filePick').addEventListener('change', e => { uploadAll([...e.target.files]); e.target.value = ''; });
-document.getElementById('dirPick').addEventListener('change', e => { uploadAll([...e.target.files]); e.target.value = ''; });
+// Single source of truth for accepted types: drives the picker filter + hint.
+document.getElementById('filePick').accept = ALLOWED.join(',');
+document.getElementById('dropHint').textContent = '(' + ALLOWED.join(' ') + ' — folder drop needs Chromium/Firefox)';
+for (const id of ['filePick', 'dirPick']) {
+  document.getElementById(id).addEventListener('change', e => { uploadAll([...e.target.files]); e.target.value = ''; });
+}
 
 const overlay = document.getElementById('dropOverlay');
 let dragDepth = 0;
 const dragHasFiles = e => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+const resetDrag = () => { dragDepth = 0; overlay.classList.remove('show'); };
 window.addEventListener('dragenter', e => { if (!dragHasFiles(e)) return; e.preventDefault(); dragDepth++; overlay.classList.add('show'); });
 window.addEventListener('dragover', e => { if (dragHasFiles(e)) e.preventDefault(); });
-window.addEventListener('dragleave', e => { if (!dragHasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) overlay.classList.remove('show'); });
+window.addEventListener('dragleave', e => { if (!dragHasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) resetDrag(); });
+window.addEventListener('dragend', resetDrag);
 window.addEventListener('drop', async e => {
   if (!dragHasFiles(e)) return;
-  e.preventDefault(); dragDepth = 0; overlay.classList.remove('show');
-  uploadAll(await filesFromDrop(e.dataTransfer));
+  e.preventDefault(); resetDrag();
+  const { files, errors } = await filesFromDrop(e.dataTransfer);
+  uploadAll(files, errors);
 });
+// A drag canceled with Esc fires no dragleave/drop in some browsers.
+window.addEventListener('keydown', e => { if (e.key === 'Escape') resetDrag(); });
 
 // Collect dropped files, recursing folders where the directory API exists.
+// Unreadable files/dirs are surfaced as errors, not silently dropped.
 async function filesFromDrop(dt) {
   const items = dt.items;
   const canDir = items && items.length && typeof items[0].webkitGetAsEntry === 'function';
-  if (!canDir) return [...dt.files]; // file-only fallback
-  const out = [];
-  const entries = [];
+  if (!canDir) return { files: [...dt.files], errors: [] };
+  const files = [], errors = [], entries = [];
   for (const it of items) { const en = it.webkitGetAsEntry(); if (en) entries.push(en); }
-  for (const en of entries) await walkEntry(en, out);
-  return out;
+  for (const en of entries) await walkEntry(en, files, errors);
+  return { files, errors };
 }
-function walkEntry(entry, out) {
+function walkEntry(entry, files, errors) {
   return new Promise(resolve => {
-    if (entry.isFile) { entry.file(f => { out.push(f); resolve(); }, () => resolve()); }
-    else if (entry.isDirectory) {
+    if (entry.isFile) {
+      entry.file(f => { files.push(f); resolve(); }, () => { errors.push(entry.fullPath || entry.name); resolve(); });
+    } else if (entry.isDirectory) {
       const reader = entry.createReader();
       const readBatch = () => reader.readEntries(async ents => {
         if (!ents.length) { resolve(); return; }
-        for (const e of ents) await walkEntry(e, out);
+        for (const e of ents) await walkEntry(e, files, errors);
         readBatch();
-      }, () => resolve());
+      }, () => { errors.push((entry.fullPath || entry.name) + '/'); resolve(); });
       readBatch();
     } else resolve();
   });
 }
 
-// Upload a list of files sequentially, reporting an outcome for each.
-async function uploadAll(all) {
-  if (!all || !all.length) return;
+// Sequential upload via a single-worker queue, so overlapping batches append to
+// one panel instead of clobbering each other's rows/summary.
+let uQueue = [], uRunning = false, uRows = null, uTally = null;
+function uploadAll(files, errorNames) {
+  for (const name of errorNames || []) uQueue.push({ name, kind: 'error', status: 'unreadable' });
+  for (const f of files || []) uQueue.push(hasExt(f.name) ? { file: f } : { name: f.name, kind: 'rejected', status: 'unsupported' });
+  if (!uRunning && uQueue.length) runQueue();
+}
+async function runQueue() {
+  uRunning = true;
   const panel = document.getElementById('uploadPanel');
   panel.hidden = false;
-  const sendable = [], rejected = [];
-  for (const f of all) (hasExt(f.name) ? sendable : rejected).push(f);
-  panel.innerHTML = `<h3>Uploading ${sendable.length} file(s)</h3><div id="uRows"></div><div class="u-summary" id="uSummary">…</div>`;
-  const rows = document.getElementById('uRows');
-  const tally = { stored: 0, duplicate: 0, quarantined: 0, rejected: 0, error: 0 };
-
-  for (const f of rejected) { tally.rejected++; addRow(rows, f.name, 'rejected', 'unsupported'); }
-
-  for (const f of sendable) {
-    const row = addRow(rows, f.name, 'pending', '…');
+  panel.innerHTML = '<h3 id="uHead"></h3><div id="uRows"></div><div class="u-summary" id="uSummary">…</div>';
+  uRows = document.getElementById('uRows');
+  const uHead = document.getElementById('uHead');
+  const uSummary = document.getElementById('uSummary');
+  uTally = { stored: 0, duplicate: 0, quarantined: 0, rejected: 0, error: 0 };
+  let done = 0;
+  while (uQueue.length) {
+    const item = uQueue.shift();
+    done++;
+    uHead.textContent = `Uploading ${done + uQueue.length} file(s)`;
+    if (item.kind) { uTally[item.kind]++; addRow(item.name, item.kind, item.status); continue; }
+    const f = item.file;
+    const row = addRow(f.name, 'pending', '…');
     try {
       const r = await fetch('/api/upload?filename=' + encodeURIComponent(f.name), { method: 'POST', body: f });
       if (!r.ok) {
-        if (r.status >= 400 && r.status < 500) { tally.rejected++; setRow(row, 'rejected', 'rejected'); }
-        else { tally.error++; setRow(row, 'error', 'error ' + r.status); }
+        if (r.status >= 400 && r.status < 500) { uTally.rejected++; setRow(row, 'rejected', 'rejected'); }
+        else { uTally.error++; setRow(row, 'error', 'error ' + r.status); }
         continue;
       }
       const outs = (await r.json()).outcomes || [];
       const c = { stored: 0, duplicate: 0, quarantined: 0 };
+      let bad = !outs.length; // empty response is not a success
       for (const o of outs) {
         if (o.kind === 'duplicate') c.duplicate++;
-        else if (o.quarantined) c.quarantined++;
-        else c.stored++;
+        else if (o.kind === 'stored') (o.quarantined ? c.quarantined++ : c.stored++);
+        else bad = true; // unknown kind → not a success
       }
-      tally.stored += c.stored; tally.duplicate += c.duplicate; tally.quarantined += c.quarantined;
+      // Count any real outcomes even if an unknown kind also appeared.
+      uTally.stored += c.stored; uTally.duplicate += c.duplicate; uTally.quarantined += c.quarantined;
+      if (bad) { uTally.error++; setRow(row, 'error', 'unexpected response'); continue; }
       const cls = c.quarantined ? 'quarantined' : c.stored ? 'stored' : 'duplicate';
-      const label = outs.length > 1 ? summaryLabel(c) : cls;
-      setRow(row, cls, label);
-    } catch (err) { tally.error++; setRow(row, 'error', 'error'); }
+      setRow(row, cls, outs.length > 1 ? fmtCounts(c, ['stored', 'duplicate', 'quarantined'], ', ') : cls);
+    } catch (err) { uTally.error++; setRow(row, 'error', 'error'); }
   }
-  renderSummary(tally);
-  load(); // refresh the Edition listing
+  const summary = fmtCounts(uTally, ['stored', 'duplicate', 'quarantined', 'rejected', 'error'], ' · ') || 'nothing to upload';
+  uSummary.innerHTML = 'Done — ' + summary +
+    (uTally.quarantined ? ' · <a href="#" onclick="loadQuarantine();return false">review quarantine</a>' : '');
+  uRunning = false;
+  load(); // refresh the Edition listing once, after the queue drains
 }
-
-function addRow(container, name, cls, status) {
+function addRow(name, cls, status) {
   const div = document.createElement('div');
   div.className = 'u-row';
   div.innerHTML = `<span class="u-name">${esc(name)}</span><span class="u-status s-${cls}">${esc(status)}</span>`;
-  container.appendChild(div);
+  uRows.appendChild(div);
   return div;
 }
 function setRow(row, cls, status) {
   const s = row.querySelector('.u-status');
   s.className = 'u-status s-' + cls;
   s.textContent = status;
-}
-function summaryLabel(c) {
-  const p = [];
-  if (c.stored) p.push(c.stored + ' stored');
-  if (c.duplicate) p.push(c.duplicate + ' dup');
-  if (c.quarantined) p.push(c.quarantined + ' quarantined');
-  return p.join(', ') || '—';
-}
-function renderSummary(t) {
-  const p = [];
-  if (t.stored) p.push(t.stored + ' stored');
-  if (t.duplicate) p.push(t.duplicate + ' duplicate');
-  if (t.quarantined) p.push(t.quarantined + ' quarantined');
-  if (t.rejected) p.push(t.rejected + ' rejected');
-  if (t.error) p.push(t.error + ' error');
-  document.getElementById('uSummary').innerHTML = 'Done — ' + (p.join(' · ') || 'nothing to upload') +
-    (t.quarantined ? ' · <a href="#" onclick="loadQuarantine();return false">review quarantine</a>' : '');
 }
 load();
 </script>

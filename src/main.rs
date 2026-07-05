@@ -13,7 +13,8 @@ use amiga_game_vault::web;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = std::env::var("VAULT_DATA").unwrap_or_else(|_| "data".to_string());
-    let addr = std::env::var("VAULT_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    // Default port 4500 ("A500" in leet).
+    let addr = std::env::var("VAULT_ADDR").unwrap_or_else(|_| "127.0.0.1:4500".to_string());
 
     let vault = Vault::open(&data_dir)?;
     let state = Arc::new(Mutex::new(vault));

@@ -39,25 +39,26 @@ docker compose up -d --build
 ```
 
 This builds the image from the `Dockerfile`, creates a persistent `vault-data`
-volume, and starts the service on port **8080**.
+volume, and starts the service on port **4500** ("A500" in leet). If that port is
+taken, override it: `VAULT_HOST_PORT=4501 docker compose up -d --build`.
 
 **3. Verify it's running**
 
 ```bash
 docker compose ps          # STATUS should show "healthy"
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/   # -> 200
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:4500/   # -> 200
 ```
 
 **4. Open the browser UI**
 
-Visit **http://localhost:8080** to browse, search, and review your collection.
+Visit **http://localhost:4500** to browse, search, and review your collection.
 
 **5. Upload an ADF** (uploads and DAT imports go through the HTTP API)
 
 ```bash
 # The filename carries the identity; the request body is the raw ADF bytes.
 curl -X POST \
-  "http://localhost:8080/api/upload?filename=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[cr QTX].adf"))')" \
+  "http://localhost:4500/api/upload?filename=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[cr QTX].adf"))')" \
   --data-binary @"/path/to/your.adf"
 ```
 
@@ -77,16 +78,19 @@ docker compose up -d --build # rebuild after pulling new code
 
 Set via environment variables (see `compose.yml`):
 
-| Variable     | Default          | Purpose                                            |
-|--------------|------------------|----------------------------------------------------|
-| `VAULT_ADDR` | `0.0.0.0:8080`   | Listen address inside the container.               |
-| `VAULT_DATA` | `/data`          | Data directory (content-addressed blobs + SQLite). |
+| Variable          | Default          | Purpose                                            |
+|-------------------|------------------|----------------------------------------------------|
+| `VAULT_HOST_PORT` | `4500`           | Host port the container publishes to (compose).    |
+| `VAULT_ADDR`      | `0.0.0.0:4500`   | Listen address inside the container.               |
+| `VAULT_DATA`      | `/data`          | Data directory (content-addressed blobs + SQLite). |
 
-**Port** — change the host mapping in `compose.yml`. To keep it host-local only:
+**Port** — the published host port defaults to **4500** and is overridable without
+editing files: `VAULT_HOST_PORT=4501 docker compose up -d`. To keep it host-local
+only, change the mapping in `compose.yml`:
 
 ```yaml
 ports:
-  - "127.0.0.1:8080:8080"
+  - "127.0.0.1:${VAULT_HOST_PORT:-4500}:4500"
 ```
 
 **Data & backups** — everything lives in the `vault-data` volume under `/data`
@@ -132,7 +136,7 @@ Requires a Rust toolchain and a C compiler (for the bundled SQLite).
 ```bash
 make build            # release binary at target/release/amiga-game-vault
 make verify           # build + full test suite
-VAULT_ADDR=127.0.0.1:8080 VAULT_DATA=./data ./target/release/amiga-game-vault
+VAULT_ADDR=127.0.0.1:4500 VAULT_DATA=./data ./target/release/amiga-game-vault
 ```
 
 ## License
