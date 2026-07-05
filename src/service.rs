@@ -322,7 +322,18 @@ impl Vault {
             let Some(parsed) = parse_tosec(&tosec) else {
                 continue;
             };
-            let category = infer_category(parsed.qualifier.as_deref(), None);
+            // The name only gives a definitive demo signal; the DAT-source signal
+            // used at ingest isn't stored per artifact. So only *upgrade* to demo
+            // from the name, and otherwise preserve the artifact's current
+            // category rather than downgrading a DAT-classified tool/demo to game.
+            let category = match infer_category(parsed.qualifier.as_deref(), None) {
+                Category::Demo => Category::Demo,
+                _ => match self.db.artifact_category(&uid)?.as_deref() {
+                    Some("tool") => Category::Tool,
+                    Some("demo") => Category::Demo,
+                    _ => Category::Game,
+                },
+            };
             let new_ed = self.ensure_edition(category.as_str(), &edition_key(&parsed))?;
             let old = self.db.artifact_edition(&uid)?;
             if old != Some(new_ed) {
@@ -495,5 +506,53 @@ mod tests {
 
         // Idempotent: a second pass moves nothing.
         assert_eq!(v.reidentify().unwrap().moved, 0);
+    }
+
+    #[test]
+    fn reidentify_preserves_dat_categorized_tool() {
+        // A tool categorized via a DAT source at ingest (no qualifier in the
+        // name) must not be downgraded to `game` by re-identify.
+        let dir = tempfile::tempdir().unwrap();
+        let v = Vault::open_memory(dir.path()).unwrap();
+        let title_id = v.db.upsert_title("DiskMaster", "tool").unwrap();
+        let key = EditionKey {
+            title: "DiskMaster".into(),
+            version: None,
+            language: None,
+            publisher: Some("SomeCorp".into()),
+            qualifier: None,
+            disk_no: None,
+            disk_count: None,
+        };
+        let ed = v.db.upsert_edition(title_id, &key).unwrap();
+        let rec = NewArtifact {
+            uid: "toolaaaa01".into(),
+            hashes: Hashes {
+                sha1: "sha_tool".into(),
+                crc32: "c".into(),
+                md5: "m".into(),
+            },
+            edition_id: Some(ed),
+            display_title: Some("DiskMaster".into()),
+            tosec_name: Some("DiskMaster (1990)(SomeCorp).adf".into()),
+            container: "adf".into(),
+            blob_sha1: "sha_tool".into(),
+            ..Default::default()
+        };
+        v.db.insert_artifact(&rec).unwrap();
+        v.db.set_primary(ed, Some("toolaaaa01")).unwrap();
+
+        let rep = v.reidentify().unwrap();
+        assert_eq!(rep.moved, 0, "category preserved, nothing to move");
+        assert_eq!(
+            v.browse(Some("DiskMaster"), Some("tool"), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(v
+            .browse(Some("DiskMaster"), Some("game"), None, None)
+            .unwrap()
+            .is_empty());
     }
 }

@@ -41,9 +41,14 @@ const QUALIFIER_TOKENS: &[&str] = &[
     "demo",
     "demo-playable",
     "demo-rolling",
+    "demo-slideshow",
+    "demo-kus",
     "playable demo",
     "rolling demo",
     "preview",
+    "prerelease",
+    "proto",
+    "prototype",
 ];
 
 fn is_lang_token(t: &str) -> bool {

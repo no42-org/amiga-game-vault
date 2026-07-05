@@ -128,15 +128,42 @@ impl Db {
 
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(MIGRATION)?;
-        // Idempotent column addition for databases created before `qualifier`.
-        match self
+        // Bring an `edition` table created before `qualifier` up to the current
+        // schema. A plain ALTER ADD COLUMN can't rebuild the UNIQUE constraint
+        // (which must now include `qualifier`), so rebuild the table when the
+        // column is absent. Idempotent: fresh DBs already have the column.
+        let has_qualifier = self
             .conn
-            .execute("ALTER TABLE edition ADD COLUMN qualifier TEXT", [])
-        {
-            Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
-                if msg.contains("duplicate column") => {}
-            Err(e) => return Err(e.into()),
+            .prepare("PRAGMA table_info(edition)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|c| c == "qualifier");
+        if !has_qualifier {
+            // Standard SQLite table-rebuild: disable FK enforcement across the
+            // swap (artifact.edition_id references edition; ids are preserved).
+            self.conn.execute_batch("PRAGMA foreign_keys=OFF")?;
+            self.conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE edition_new (
+                    id                   INTEGER PRIMARY KEY,
+                    title_id             INTEGER NOT NULL REFERENCES title(id),
+                    version              TEXT,
+                    language             TEXT,
+                    publisher            TEXT,
+                    qualifier            TEXT,
+                    disk_no              INTEGER,
+                    disk_count           INTEGER,
+                    primary_artifact_uid TEXT,
+                    UNIQUE (title_id, version, language, publisher, qualifier, disk_no, disk_count)
+                 );
+                 INSERT INTO edition_new
+                     (id, title_id, version, language, publisher, disk_no, disk_count, primary_artifact_uid)
+                     SELECT id, title_id, version, language, publisher, disk_no, disk_count, primary_artifact_uid
+                     FROM edition;
+                 DROP TABLE edition;
+                 ALTER TABLE edition_new RENAME TO edition;
+                 COMMIT;",
+            )?;
         }
         Ok(())
     }
@@ -499,7 +526,7 @@ impl Db {
         let lang = language.unwrap_or("").to_string();
         let mut sql = String::from(
             "SELECT e.id, t.name, t.category, e.version, e.language, e.publisher, e.qualifier,
-                    (SELECT a.year FROM artifact a WHERE a.edition_id = e.id AND a.year IS NOT NULL LIMIT 1) AS yr,
+                    (SELECT MIN(a.year) FROM artifact a WHERE a.edition_id = e.id AND a.year IS NOT NULL) AS yr,
                     e.disk_no, e.disk_count, e.primary_artifact_uid,
                     (SELECT COUNT(*) FROM artifact a WHERE a.edition_id = e.id) AS vc
              FROM edition e JOIN title t ON e.title_id = t.id
@@ -574,6 +601,21 @@ impl Db {
         Ok(rows)
     }
 
+    /// The category of the Title an artifact currently belongs to, if any.
+    pub fn artifact_category(&self, uid: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT t.category FROM artifact a
+                 JOIN edition e ON a.edition_id = e.id
+                 JOIN title t ON e.title_id = t.id
+                 WHERE a.uid = ?1",
+                [uid],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// The Edition an artifact currently belongs to, if any.
     pub fn artifact_edition(&self, uid: &str) -> Result<Option<i64>> {
         Ok(self
@@ -633,5 +675,48 @@ mod tests {
             db.artifact_uid_by_sha1(sha).unwrap().as_deref(),
             Some(uid.as_str())
         );
+    }
+
+    #[test]
+    fn migrate_rebuilds_pre_qualifier_edition_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.sqlite");
+        // Simulate a database created before `qualifier`: the OLD edition schema
+        // whose UNIQUE constraint omits qualifier.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE title (id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT 'game', UNIQUE(name, category));
+                 CREATE TABLE edition (id INTEGER PRIMARY KEY, title_id INTEGER NOT NULL,
+                    version TEXT, language TEXT, publisher TEXT, disk_no INTEGER,
+                    disk_count INTEGER, primary_artifact_uid TEXT,
+                    UNIQUE(title_id, version, language, publisher, disk_no, disk_count));",
+            )
+            .unwrap();
+        }
+
+        // Opening runs migrate(), which must rebuild `edition` with `qualifier`
+        // in the UNIQUE constraint.
+        let db = Db::open(path.to_str().unwrap()).unwrap();
+        let title_id = db.upsert_title("Agony", "demo").unwrap();
+        let k1 = EditionKey {
+            title: "Agony".into(),
+            version: Some("v1".into()),
+            language: Some("en".into()),
+            publisher: Some("P".into()),
+            qualifier: Some("demo-playable".into()),
+            disk_no: Some(1),
+            disk_count: Some(2),
+        };
+        let k2 = EditionKey {
+            qualifier: Some("demo-rolling".into()),
+            ..k1.clone()
+        };
+        // On the old (un-rebuilt) index these would collide on the non-qualifier
+        // columns; after the rebuild they are two distinct editions.
+        let e1 = db.upsert_edition(title_id, &k1).unwrap();
+        let e2 = db.upsert_edition(title_id, &k2).unwrap();
+        assert_ne!(e1, e2);
     }
 }
