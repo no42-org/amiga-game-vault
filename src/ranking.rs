@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::edition::DumpInfo;
 
 /// The comparable ranking key (ascending = better).
-fn rank_key(info: &DumpInfo) -> (bool, u32, bool, u32) {
+pub fn rank_key(info: &DumpInfo) -> (bool, u32, bool, u32) {
     let is_clean = info.verified_good || info.modifications == 0;
     (
         !is_clean,              // clean (verified/original) first

@@ -21,8 +21,8 @@ use crate::identity::Hashes;
 use crate::ingest::{detect_container, DiskImage, Tools};
 use crate::naming::{parse_tosec, TosecName};
 use crate::ranking::{
-    lineage_coverage, primary_set_for_lineage, select_primary, select_primary_lineage, DiskMember,
-    LineageCoverage,
+    lineage_coverage, primary_set_for_lineage, rank_key, select_primary, select_primary_lineage,
+    DiskMember, LineageCoverage,
 };
 use crate::{Error, Result};
 
@@ -62,6 +62,43 @@ pub struct SetView {
     pub complete_lineages: usize,
     pub primary_lineage: Option<String>,
     pub variant_count: i64,
+}
+
+/// A Work: everything sharing a title name (the game release(s) and demos),
+/// grouped at read time.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkView {
+    pub name: String,
+    pub release_count: usize,
+    pub game_count: usize,
+    pub demo_count: usize,
+    pub tool_count: usize,
+    pub releases: Vec<SetView>,
+}
+
+/// A boot-disk (trainer) option for a playable set.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrainerOption {
+    pub uid: String,
+    /// Trainer text (e.g. "+9 TLPI"), or `None` for the plain boot disk.
+    pub trainer: Option<String>,
+    /// Whether this is the ranking-default boot disk.
+    pub is_default: bool,
+}
+
+/// A playable variation of a game: a complete coherent set the user can download.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlayableSet {
+    pub rep_edition_id: i64,
+    /// The crack/hack group, or `None` for the original.
+    pub lineage: Option<String>,
+    pub complete: bool,
+    pub missing_disks: Vec<u32>,
+    pub is_recommended: bool,
+    /// Coherent `(disk_no, uid)` (best per disk); empty for an incomplete variation.
+    pub disks: Vec<(u32, String)>,
+    /// Boot-disk trainer choices for this lineage.
+    pub trainer_options: Vec<TrainerOption>,
 }
 
 /// The result of a re-identification pass.
@@ -470,8 +507,20 @@ impl Vault {
     }
 
     /// Export a coherent set (best-per-disk of `lineage`) under canonical names.
-    /// Refuses an incomplete or unknown lineage — an exported set must be bootable.
     pub fn export_set(&self, edition_id: i64, lineage: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.export_set_with(edition_id, lineage, None)
+    }
+
+    /// Export a coherent set, optionally overriding the boot disk with `boot_uid`
+    /// (a chosen trainer variant). Refuses an incomplete or unknown lineage, and
+    /// ignores a boot override that isn't a valid boot-disk variant of the lineage.
+    pub fn export_set_with(
+        &self,
+        edition_id: i64,
+        lineage: &str,
+        boot_uid: Option<&str>,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        use std::collections::BTreeMap;
         let (dc, members) = self.gather_set(edition_id)?;
         let complete = lineage_coverage(&members, dc)
             .iter()
@@ -481,14 +530,151 @@ impl Vault {
                 "lineage '{lineage}' is not a complete set"
             )));
         }
+        let mut chosen: BTreeMap<u32, String> = primary_set_for_lineage(&members, lineage)
+            .into_iter()
+            .map(|i| (members[i].disk_no, members[i].tiebreak.clone()))
+            .collect();
+        let boot_disk = *chosen.keys().min().expect("a complete set has disks");
+        if let Some(b) = boot_uid {
+            let valid = members.iter().any(|m| {
+                m.tiebreak == b
+                    && m.disk_no == boot_disk
+                    && !m.info.disqualified()
+                    && m.lineage.clone().unwrap_or_default() == lineage
+            });
+            if valid {
+                chosen.insert(boot_disk, b.to_string());
+            }
+        }
         let mut out = Vec::new();
-        for idx in primary_set_for_lineage(&members, lineage) {
-            let uid = &members[idx].tiebreak;
-            if let Some(v) = self.db.get_artifact(uid)? {
+        for (_disk, uid) in chosen {
+            if let Some(v) = self.db.get_artifact(&uid)? {
                 out.push((v.canonical_name.clone(), self.store.get(&v.blob_sha1)?));
             }
         }
         Ok(out)
+    }
+
+    // --- Works & playable sets --------------------------------------------
+
+    /// Group releases into Works by title name (across category).
+    pub fn list_works(
+        &self,
+        q: Option<&str>,
+        category: Option<&str>,
+        language: Option<&str>,
+    ) -> Result<Vec<WorkView>> {
+        use std::collections::BTreeMap;
+        let mut by_name: BTreeMap<String, Vec<SetView>> = BTreeMap::new();
+        for s in self.list_sets(q, category, language, false)? {
+            by_name
+                .entry(s.title.trim().to_string())
+                .or_default()
+                .push(s);
+        }
+        let mut works: Vec<WorkView> = by_name
+            .into_iter()
+            .map(|(name, releases)| {
+                let count = |c: &str| releases.iter().filter(|r| r.category == c).count();
+                WorkView {
+                    release_count: releases.len(),
+                    game_count: count("game"),
+                    demo_count: count("demo"),
+                    tool_count: count("tool"),
+                    name,
+                    releases,
+                }
+            })
+            .collect();
+        works.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(works)
+    }
+
+    /// Playable variations of a game release: complete coherent sets to download,
+    /// plus incomplete ones (marked), each with its boot-disk trainer options.
+    pub fn playable_sets(&self, edition_id: i64) -> Result<Vec<PlayableSet>> {
+        let (dc, members) = self.gather_set(edition_id)?;
+        let mut out = Vec::new();
+        for c in lineage_coverage(&members, dc) {
+            let tag = c.lineage.clone().unwrap_or_default();
+            let missing_disks: Vec<u32> =
+                (1..=dc).filter(|d| !c.disks_covered.contains(d)).collect();
+            let disks: Vec<(u32, String)> = if c.complete {
+                let mut files: Vec<(u32, String)> = primary_set_for_lineage(&members, &tag)
+                    .into_iter()
+                    .map(|i| (members[i].disk_no, members[i].tiebreak.clone()))
+                    .collect();
+                files.sort_by_key(|(d, _)| *d);
+                files
+            } else {
+                Vec::new()
+            };
+            let trainer_options = self.trainer_options(&members, &tag, &disks);
+            out.push(PlayableSet {
+                rep_edition_id: edition_id,
+                lineage: c.lineage,
+                complete: c.complete,
+                missing_disks,
+                is_recommended: c.is_primary,
+                disks,
+                trainer_options,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The boot-disk trainer choices for a lineage: the best variant per distinct
+    /// trainer on the set's boot (lowest) disk. Empty unless there's a real choice.
+    fn trainer_options(
+        &self,
+        members: &[DiskMember],
+        lineage: &str,
+        disks: &[(u32, String)],
+    ) -> Vec<TrainerOption> {
+        use std::collections::BTreeMap;
+        let Some(boot_disk) = disks.iter().map(|(d, _)| *d).min() else {
+            return Vec::new();
+        };
+        let default_uid = disks
+            .iter()
+            .find(|(d, _)| *d == boot_disk)
+            .map(|(_, u)| u.clone());
+        let mut best: BTreeMap<Option<String>, usize> = BTreeMap::new();
+        for (i, m) in members.iter().enumerate() {
+            if m.info.disqualified()
+                || m.disk_no != boot_disk
+                || m.lineage.clone().unwrap_or_default() != lineage
+            {
+                continue;
+            }
+            let key = m.info.trainer.clone();
+            match best.get(&key) {
+                Some(&cur) => {
+                    let better = rank_key(&m.info)
+                        .cmp(&rank_key(&members[cur].info))
+                        .then_with(|| m.tiebreak.cmp(&members[cur].tiebreak));
+                    if better == std::cmp::Ordering::Less {
+                        best.insert(key, i);
+                    }
+                }
+                None => {
+                    best.insert(key, i);
+                }
+            }
+        }
+        if best.len() < 2 {
+            return Vec::new(); // no real choice
+        }
+        best.into_iter()
+            .map(|(trainer, i)| {
+                let uid = members[i].tiebreak.clone();
+                TrainerOption {
+                    is_default: default_uid.as_deref() == Some(uid.as_str()),
+                    trainer,
+                    uid,
+                }
+            })
+            .collect()
     }
 
     /// Re-identify all named artifacts from their retained TOSEC name: recompute
