@@ -97,13 +97,26 @@ ports:
 (`blobs/` holds immutable image bytes; `vault.sqlite` holds the catalog). Back it
 up by copying the volume, e.g.:
 
-> Upgrading from an older checkout named `amiga-game-vault`? Your data was in the
-> `amiga-game-vault_vault-data` volume. Migrate it once with
-> `docker volume create amiga-disk-vault_vault-data && docker run --rm -v amiga-game-vault_vault-data:/from -v amiga-disk-vault_vault-data:/to alpine sh -c 'cp -a /from/. /to/'`.
-
 ```bash
 docker run --rm -v amiga-disk-vault_vault-data:/data -v "$PWD":/backup \
   debian:bookworm-slim tar czf /backup/vault-backup.tar.gz -C /data .
+```
+
+**Migrating data from the old `amiga-game-vault` name** — Compose now pins the
+project to `amiga-disk-vault`, so a fresh `docker compose up` starts an *empty*
+`amiga-disk-vault_vault-data` volume; your existing catalog stays in the old
+volume. Move it once. The old volume is `<old-project>_vault-data`, where
+`<old-project>` was the old checkout's directory name (often `amiga-game-vault`);
+substitute the real name below. Stop the old stack first, and the
+`volume inspect` guard fails fast if the source name is wrong (so you never copy
+from an auto-created empty volume):
+
+```bash
+docker compose down                                 # stop the old stack first
+docker volume inspect amiga-game-vault_vault-data   # aborts here if the name is wrong
+docker volume create amiga-disk-vault_vault-data
+docker run --rm -v amiga-game-vault_vault-data:/from -v amiga-disk-vault_vault-data:/to \
+  alpine sh -c 'cp -a /from/. /to/'
 ```
 
 ---
