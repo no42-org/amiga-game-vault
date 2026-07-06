@@ -320,7 +320,13 @@ impl Vault {
     }
 
     pub fn variants(&self, edition_id: i64) -> Result<Vec<ArtifactView>> {
-        self.db.edition_variants(edition_id)
+        let mut views = self.db.edition_variants(edition_id)?;
+        for v in &mut views {
+            // Size via a filesystem stat; a failed lookup degrades to no size
+            // rather than failing the whole list.
+            v.byte_len = self.store.byte_len(&v.blob_sha1).ok();
+        }
+        Ok(views)
     }
 
     pub fn get_artifact(&self, uid: &str) -> Result<Option<ArtifactView>> {
