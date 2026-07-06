@@ -121,6 +121,7 @@ fn parse_game_page(html: &str, base: &str, query_name: &str, url: &str) -> Optio
 
     let genre = extract_genre(&doc);
     let description = extract_description(&doc);
+    let cover = extract_cover(&doc, base);
     let shots = extract_shots(&doc, base);
 
     Some(ProviderResult {
@@ -129,8 +130,30 @@ fn parse_game_page(html: &str, base: &str, query_name: &str, url: &str) -> Optio
         description,
         genre,
         year: None,
+        cover,
         shots,
         score,
+    })
+}
+
+/// The front cover (box art): the `t=lbcover` image labelled `front image`
+/// (the back is `__back image`). Downloaded full-size like screenshots.
+fn extract_cover(doc: &scraper::Html, base: &str) -> Option<Shot> {
+    use scraper::Selector;
+    let img = Selector::parse(r#"img[src*="/image/"]"#).ok()?;
+    doc.select(&img).find_map(|el| {
+        let src = el.value().attr("src").unwrap_or("");
+        let alt = el.value().attr("alt").unwrap_or("").to_ascii_lowercase();
+        // Cover art carries t=lbcover; keep only the front, skip the back cover.
+        if !src.contains("lbcover") || !alt.contains("front") {
+            return None;
+        }
+        let hash = src.split("/image/").nth(1)?.split(['?', '/']).next()?;
+        (!hash.is_empty()).then(|| Shot {
+            url: format!("{base}/image/{hash}"),
+            caption: None,
+            source: SOURCE.to_string(),
+        })
     })
 }
 
@@ -284,6 +307,7 @@ mod tests {
             <div class="game-about"><p>This simulation puts you in the cockpit of the
                  A-10 Thunderbolt II, also known as the "Warthog".</p></div>
             <a href="/image/cover0001?s=512&f=jpg"><img src="/image/cover0001?w=200&h=266&t=lbcover" alt="front image"></a>
+            <a href="/image/back0002?s=512&f=jpg"><img src="/image/back0002?w=200&h=266&t=lbcover" alt="__back image"></a>
             <a href="/image/shot0001?s=2x"><img src="/image/shot0001?w=332&h=208" alt=""></a>
             <a href="/image/shot0002?s=2x"><img src="/image/shot0002?w=332&h=208" alt=""></a>
             <p>Page generated in 0.05 seconds. All times are in UTC. By submitting information you
@@ -306,6 +330,11 @@ mod tests {
             r.shots.len(),
             2,
             "cover (s=512) excluded, two screenshots (s=2x) kept"
+        );
+        assert_eq!(
+            r.cover.as_ref().map(|c| c.url.as_str()),
+            Some("https://openretro.org/image/cover0001"),
+            "front cover captured, back cover excluded"
         );
         assert_eq!(r.shots[0].url, "https://openretro.org/image/shot0001");
         assert!(r.score > 0.9);

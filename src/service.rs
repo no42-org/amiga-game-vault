@@ -870,38 +870,52 @@ impl Vault {
             .collect())
     }
 
-    /// Persist a merged enrichment record: store each screenshot's bytes in the
-    /// content-addressed blob store, then write metadata and screenshots in one
-    /// transaction. `images` are `(bytes, mime, caption, source, ord)`.
+    /// Persist a merged enrichment record: store each image's bytes in the
+    /// content-addressed blob store, then write metadata and images (cover +
+    /// screenshots) in one transaction. `images` are
+    /// `(bytes, mime, caption, source, ord, kind)`.
     ///
-    /// If the merge expected screenshots but every download failed (a transient
-    /// image-CDN error), the existing screenshots are kept rather than wiped —
-    /// only a run that actually produced images (or one that legitimately found
-    /// none) replaces them.
+    /// If the merge expected images but every download failed (a transient
+    /// image-CDN error), the existing cover/screenshots are kept rather than
+    /// wiped — only a run that actually produced images (or one that legitimately
+    /// found none) replaces them.
     pub fn save_enrichment(
         &self,
         title_id: i64,
         merged: &crate::enrich::Merged,
         images: &[crate::enrich::ScreenshotBytes],
     ) -> Result<()> {
-        let mut shots = Vec::with_capacity(images.len());
-        for (bytes, mime, caption, source, ord) in images {
+        let mut cover_rows: Vec<crate::db::StoredShot> = Vec::new();
+        let mut shot_rows: Vec<crate::db::StoredShot> = Vec::new();
+        for (bytes, mime, caption, source, ord, kind) in images {
             let (hashes, _is_new) = self.store.put(bytes)?;
-            shots.push((
+            let row = (
                 hashes.sha1,
                 mime.clone(),
                 caption.clone(),
                 source.clone(),
                 *ord,
-            ));
+                (*kind).to_string(),
+            );
+            if *kind == "cover" {
+                cover_rows.push(row);
+            } else {
+                shot_rows.push(row);
+            }
         }
-        // Replace screenshots when we downloaded some, or when the merge found no
-        // screenshots at all; otherwise (expected some, got none) leave them be.
-        let shots_arg = if !shots.is_empty() || merged.shots.is_empty() {
-            Some(shots.as_slice())
-        } else {
-            None
-        };
+        // Per-kind no-wipe: replace a kind only when we downloaded new rows for it,
+        // or the merge legitimately produced none of that kind. So a re-enrich that
+        // yields screenshots but no cover keeps the existing cover, and vice versa;
+        // a transient failure of both keeps everything.
+        let replace_cover = !cover_rows.is_empty() || merged.cover.is_none();
+        let replace_shots = !shot_rows.is_empty() || merged.shots.is_empty();
+        let mut rows: Vec<crate::db::StoredShot> = Vec::new();
+        if replace_cover {
+            rows.append(&mut cover_rows);
+        }
+        if replace_shots {
+            rows.append(&mut shot_rows);
+        }
         self.db.save_enrichment(
             title_id,
             merged.genre.as_deref(),
@@ -911,7 +925,9 @@ impl Vault {
             merged.external_url.as_deref(),
             Some(f64::from(merged.score)),
             crate::enrich::now_secs(),
-            shots_arg,
+            replace_cover,
+            replace_shots,
+            &rows,
         )?;
         Ok(())
     }

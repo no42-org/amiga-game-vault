@@ -47,6 +47,8 @@ pub struct ProviderResult {
     pub description: Option<String>,
     pub genre: Option<String>,
     pub year: Option<i32>,
+    /// Front cover (box art), if the source has one. Distinct from screenshots.
+    pub cover: Option<Shot>,
     pub shots: Vec<Shot>,
     /// Fuzzy name-match confidence of this result (0..1).
     pub score: f32,
@@ -61,11 +63,13 @@ pub struct Merged {
     pub sources: String,
     pub external_url: Option<String>,
     pub score: f32,
+    pub cover: Option<Shot>,
     pub shots: Vec<Shot>,
 }
 
-/// A downloaded screenshot ready to persist: `(bytes, mime, caption, source, ord)`.
-pub type ScreenshotBytes = (Vec<u8>, String, Option<String>, String, i64);
+/// A downloaded image ready to persist: `(bytes, mime, caption, source, ord, kind)`
+/// where `kind` is `"cover"` or `"screenshot"`.
+pub type ScreenshotBytes = (Vec<u8>, String, Option<String>, String, i64, &'static str);
 
 /// Summary of an enrichment run.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -145,7 +149,9 @@ impl Http {
         Ok(Some(text))
     }
 
-    /// GET a URL as image bytes, returning `(bytes, mime)`.
+    /// GET a URL as image bytes, returning `(bytes, mime)`. The MIME is sniffed
+    /// from the leading magic bytes (OpenRetro has served `image/png` headers for
+    /// JPEG bytes), falling back to the `Content-Type` header, then `image/jpeg`.
     pub async fn get_image(&self, url: &str) -> Result<(Vec<u8>, String)> {
         let resp = self
             .client
@@ -159,18 +165,37 @@ impl Http {
                 resp.status()
             )));
         }
-        let mime = resp
+        let header_mime = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
-            .filter(|m| m.starts_with("image/"))
-            .unwrap_or_else(|| "image/jpeg".to_string());
+            .filter(|m| m.starts_with("image/"));
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| crate::Error::Invalid(format!("image body {url}: {e}")))?;
-        Ok((bytes.to_vec(), mime))
+            .map_err(|e| crate::Error::Invalid(format!("image body {url}: {e}")))?
+            .to_vec();
+        let mime = sniff_image_mime(&bytes)
+            .map(str::to_string)
+            .or(header_mime)
+            .unwrap_or_else(|| "image/jpeg".to_string());
+        Ok((bytes, mime))
+    }
+}
+
+/// Detect an image MIME from its leading magic bytes; `None` if unrecognized.
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
     }
 }
 
@@ -211,21 +236,33 @@ pub async fn run(
             report.skipped += 1;
             continue;
         };
-        // Download this title's screenshots concurrently (independent URLs,
-        // lock-free), bounded by MAX_SHOTS. Each carries its own `ord`, persisted
-        // per row and honoured by every read, so collection order is irrelevant.
-        // (Titles themselves are processed sequentially; title-level concurrency
-        // is a deferred next step if bulk enrich needs to scale.)
+        // Download this title's cover + screenshots concurrently (independent URLs,
+        // lock-free), screenshots bounded by MAX_SHOTS. Each carries its own `ord`,
+        // persisted per row and honoured by every read, so collection order is
+        // irrelevant. (Titles themselves are processed sequentially; title-level
+        // concurrency is a deferred next step if bulk enrich needs to scale.)
+        let jobs: Vec<(&Shot, &'static str)> = merged
+            .cover
+            .iter()
+            .map(|s| (s, "cover"))
+            .chain(
+                merged
+                    .shots
+                    .iter()
+                    .take(MAX_SHOTS)
+                    .map(|s| (s, "screenshot")),
+            )
+            .collect();
         let mut set = tokio::task::JoinSet::new();
-        for (i, shot) in merged.shots.iter().take(MAX_SHOTS).enumerate() {
+        for (i, (shot, kind)) in jobs.into_iter().enumerate() {
             let http = http.clone();
             let (url, caption, source) =
                 (shot.url.clone(), shot.caption.clone(), shot.source.clone());
             set.spawn(async move {
                 match http.get_image(&url).await {
-                    Ok((bytes, mime)) => Some((bytes, mime, caption, source, i as i64)),
+                    Ok((bytes, mime)) => Some((bytes, mime, caption, source, i as i64, kind)),
                     Err(e) => {
-                        eprintln!("enrich: screenshot {url} failed: {e}");
+                        eprintln!("enrich: image {url} ({kind}) failed: {e}");
                         None
                     }
                 }
@@ -267,6 +304,7 @@ fn merge(results: Vec<ProviderResult>) -> Option<Merged> {
     let description = first_str(|r| r.description.as_deref());
     let external_url = first_str(|r| r.external_url.as_deref());
     let year = kept.iter().find_map(|r| r.year);
+    let cover = kept.iter().find_map(|r| r.cover.clone());
     let score = kept.iter().map(|r| r.score).fold(0.0f32, f32::max);
 
     let mut sources: Vec<String> = Vec::new();
@@ -291,6 +329,7 @@ fn merge(results: Vec<ProviderResult>) -> Option<Merged> {
         sources: sources.join(","),
         external_url,
         score,
+        cover,
         shots,
     })
 }
@@ -384,6 +423,11 @@ mod tests {
             description: Some("desc1".into()),
             genre: None,
             year: Some(1990),
+            cover: Some(Shot {
+                url: "cover1".into(),
+                caption: None,
+                source: "openretro".into(),
+            }),
             shots: vec![Shot {
                 url: "a".into(),
                 caption: None,
@@ -397,6 +441,11 @@ mod tests {
             description: Some("desc2".into()),
             genre: Some("shooter".into()),
             year: Some(1991),
+            cover: Some(Shot {
+                url: "cover2".into(),
+                caption: None,
+                source: "hol".into(),
+            }),
             shots: vec![
                 Shot {
                     url: "a".into(),
@@ -417,6 +466,7 @@ mod tests {
         assert_eq!(m.year, Some(1990));
         assert_eq!(m.sources, "openretro,hol");
         assert_eq!(m.shots.len(), 2); // "a" deduped, "b" added
+        assert_eq!(m.cover.unwrap().url, "cover1"); // cover from the priority result
     }
 
     #[test]
@@ -427,6 +477,7 @@ mod tests {
             description: Some("d".into()),
             genre: None,
             year: None,
+            cover: None,
             shots: vec![],
             score: 0.2,
         };
