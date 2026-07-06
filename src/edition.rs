@@ -46,6 +46,18 @@ impl DumpType {
             _ => DumpType::Original,
         }
     }
+
+    /// Fold the five stored dump types into the three classes the browse UI
+    /// colour-codes by: `original`, `cracked`, `hacked`. `Modified` and `Trainer`
+    /// both read as `hacked` (a modified game); the "+N TRAINER" chip re-surfaces
+    /// `Trainer` separately from this class.
+    pub fn class3(&self) -> &'static str {
+        match self {
+            DumpType::Original => "original",
+            DumpType::Cracked => "cracked",
+            DumpType::Hacked | DumpType::Modified | DumpType::Trainer => "hacked",
+        }
+    }
 }
 
 /// The category of a Title.
@@ -284,6 +296,17 @@ mod tests {
         assert_eq!(info.lineage.as_deref(), Some("CSL"));
         assert_eq!(info.modifications, 2);
         assert!(!info.disqualified());
+    }
+
+    #[test]
+    fn dump_type_folds_to_three_display_classes() {
+        // The browse UI colour-codes by three classes; Modified and Trainer both
+        // read as "hacked" (a modified game).
+        assert_eq!(DumpType::Original.class3(), "original");
+        assert_eq!(DumpType::Cracked.class3(), "cracked");
+        assert_eq!(DumpType::Hacked.class3(), "hacked");
+        assert_eq!(DumpType::Modified.class3(), "hacked");
+        assert_eq!(DumpType::Trainer.class3(), "hacked");
     }
 
     #[test]

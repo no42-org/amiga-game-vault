@@ -492,6 +492,84 @@ fn work_groups_releases_and_playable_sets_with_trainer_override() {
 }
 
 #[test]
+fn work_reports_original_cracked_hacked_lineage_counts() {
+    // One logical disk with an original, a cracked (FLT) and a hacked (TSL)
+    // lineage collapses into one Edition; the browse reads must surface one of
+    // each type class (by lineage), and each playable lineage its own kind.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    ingest(&vault, "Turrican (1990)(Rainbow Arts).adf");
+    ingest(&vault, "Turrican (1990)(Rainbow Arts)[cr FLT].adf");
+    ingest(&vault, "Turrican (1990)(Rainbow Arts)[h TSL][t +3 DC].adf");
+
+    let works = vault.list_works(Some("Turrican"), None, None).unwrap();
+    assert_eq!(works.len(), 1);
+    let w = &works[0];
+    // Work-level totals (summed across releases) and the single release row agree.
+    assert_eq!(
+        (w.original_count, w.cracked_count, w.hacked_count),
+        (1, 1, 1),
+        "work totals one lineage of each class"
+    );
+    let game = w.releases.iter().find(|r| r.category == "game").unwrap();
+    assert_eq!(
+        (game.original_count, game.cracked_count, game.hacked_count),
+        (1, 1, 1)
+    );
+
+    // Each playable lineage carries its own display kind for the per-lineage badge.
+    let sets = vault.playable_sets(game.rep_edition_id).unwrap();
+    let kind_of = |lineage: Option<&str>| {
+        sets.iter()
+            .find(|s| s.lineage.as_deref() == lineage)
+            .map(|s| s.kind.as_str())
+    };
+    assert_eq!(kind_of(None), Some("original"));
+    assert_eq!(kind_of(Some("FLT")), Some("cracked"));
+    assert_eq!(kind_of(Some("TSL")), Some("hacked"));
+
+    // The trainer surfaces on the (single-variant) hacked lineage, so the UI can
+    // show a "+N TRAINER" chip even without a plain/trained boot-disk choice.
+    let tsl = sets
+        .iter()
+        .find(|s| s.lineage.as_deref() == Some("TSL"))
+        .unwrap();
+    assert_eq!(tsl.trainer.as_deref(), Some("+3 DC"));
+    let orig = sets.iter().find(|s| s.lineage.is_none()).unwrap();
+    assert_eq!(orig.trainer, None);
+}
+
+#[test]
+fn no_group_hack_is_classed_by_content_not_as_original() {
+    // A hack/trainer with no crack group has lineage `None`, so it lands in the
+    // no-group bucket. It must still be classed by what it is (hacked), not blanket
+    // "original" — otherwise a trained set shows an "original" badge next to its
+    // trainer chip. The class follows the best-ranked (downloaded) member.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    ingest(&vault, "Ruff (1990)(Foo)[t +3 DC].adf"); // trainer, no group -> lineage None
+
+    let works = vault.list_works(Some("Ruff"), None, None).unwrap();
+    let w = &works[0];
+    assert_eq!(
+        (w.original_count, w.cracked_count, w.hacked_count),
+        (0, 0, 1),
+        "a no-group trainer is hacked, not original"
+    );
+    let game = w.releases.iter().find(|r| r.category == "game").unwrap();
+    let sets = vault.playable_sets(game.rep_edition_id).unwrap();
+    let none = sets.iter().find(|s| s.lineage.is_none()).unwrap();
+    assert_eq!(none.kind, "hacked", "kind must agree with the trainer chip");
+    assert_eq!(none.trainer.as_deref(), Some("+3 DC"));
+
+    // A clean original sharing the no-group bucket keeps it "original" — the set
+    // downloads the clean dump, so the badge follows the best-ranked member.
+    ingest(&vault, "Ruff (1990)(Foo).adf");
+    let w2 = &vault.list_works(Some("Ruff"), None, None).unwrap()[0];
+    assert_eq!((w2.original_count, w2.hacked_count), (1, 0));
+}
+
+#[test]
 fn single_release_title_is_a_trivial_work() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open_memory(dir.path()).unwrap();

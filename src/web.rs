@@ -383,71 +383,192 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Amiga Disk Vault</title>
 <style>
-  :root { color-scheme: dark; }
-  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; background: #14161a; color: #e6e8ec; }
-  header { display: flex; align-items: center; gap: 12px; padding: 10px 20px;
-    background: #1c1f26; border-bottom: 1px solid #2a2e37; }
-  header .logo { height: 40px; width: auto; display: block; }
-  h1 { font-size: 16px; margin: 0; }
-  main { padding: 16px 20px; max-width: 1000px; }
-  input, select, button { font: inherit; padding: 6px 8px; background: #22262e; color: inherit;
-    border: 1px solid #333; border-radius: 6px; }
-  .controls { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  .edition { border: 1px solid #2a2e37; border-radius: 8px; margin: 8px 0; padding: 10px 12px; }
-  .edition .title { font-weight: 600; }
-  .meta { color: #9aa0aa; font-size: 12px; }
-  .variants { margin-top: 8px; display: none; }
+  /* Design tokens ported from the visual spec (dark navy-teal + warm orange,
+     keyed to the logo). OKLCH throughout. */
+  :root {
+    color-scheme: dark;
+    --background: oklch(0.19 0.026 232);
+    --foreground: oklch(0.93 0.012 230);
+    --card: oklch(0.23 0.03 233);
+    --primary: oklch(0.64 0.1 228);
+    --secondary: oklch(0.29 0.03 233);
+    --muted-foreground: oklch(0.68 0.02 230);
+    --accent: oklch(0.7 0.16 52);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 13%);
+    --ring: oklch(0.64 0.1 228);
+    --link: oklch(0.72 0.11 232);
+    --original: oklch(0.72 0.14 155);
+    --cracked: oklch(0.7 0.18 30);
+    --hacked: oklch(0.7 0.17 335);
+    --radius: 0.625rem;
+  }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 system-ui, -apple-system, sans-serif; margin: 0;
+    background: var(--background); color: var(--foreground); }
+  svg { display: inline-block; vertical-align: -0.125em; }
+
+  header { position: sticky; top: 0; z-index: 20; padding: 12px 20px;
+    background: color-mix(in oklch, var(--background) 92%, transparent);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+  .head-top { display: flex; align-items: center; gap: 12px; }
+  header .logo { height: 40px; width: auto; display: block; flex: none; }
+  .head-titles { min-width: 0; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; line-height: 1.2; }
+  .subtitle { margin: 1px 0 0; font-size: 12px; color: var(--muted-foreground); }
+  .head-actions { margin-left: auto; display: flex; gap: 8px; }
+
+  main { padding: 16px 20px; max-width: 1000px; margin: 0 auto; }
+  input, select, button { font: inherit; }
+  input, select { padding: 6px 9px; background: var(--card); color: inherit;
+    border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.8); }
+  input:focus, select:focus { outline: none; border-color: var(--ring);
+    box-shadow: 0 0 0 1px var(--ring); }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px;
+    background: var(--card); color: var(--foreground); border: 1px solid var(--input);
+    border-radius: calc(var(--radius) * 0.8); font-weight: 600; font-size: 12px;
+    cursor: pointer; }
+  .btn:hover { background: var(--secondary); }
+
+  .controls { display: flex; gap: 8px; margin: 12px 0 0; flex-wrap: wrap; align-items: center; }
+  .search { position: relative; flex: 1; min-width: 200px; display: flex; align-items: center; }
+  .search svg { position: absolute; left: 9px; color: var(--muted-foreground);
+    pointer-events: none; }
+  .search input { width: 100%; padding-left: 30px; }
+  /* Segmented type filter */
+  .seg { display: inline-flex; padding: 2px; gap: 2px; background: var(--card);
+    border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.8); }
+  .seg-btn { padding: 4px 10px; background: transparent; color: var(--muted-foreground);
+    border: 0; border-radius: calc(var(--radius) * 0.6); font-size: 12px; font-weight: 500;
+    cursor: pointer; }
+  .seg-btn:hover { color: var(--foreground); }
+  .seg-btn.active { background: var(--secondary); color: var(--foreground); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 12px 0 0;
+    font-size: 11px; color: var(--muted-foreground); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .t-original { color: var(--original); }
+  .t-cracked { color: var(--cracked); }
+  .t-hacked { color: var(--hacked); }
+
+  /* Work cards */
+  .edition { border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); margin: 6px 0; overflow: hidden; }
+  .card-head { display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 10px 12px; background: none; border: 0; color: inherit; cursor: pointer;
+    text-align: left; }
+  .card-head:hover { background: color-mix(in oklch, var(--secondary) 40%, transparent); }
+  .chevron { flex: none; color: var(--muted-foreground); transition: transform .15s; }
+  .card-head[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+  .card-title { min-width: 0; flex: 1; }
+  .title-line { display: block; font-weight: 600; font-size: 14px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub-line { display: block; font-size: 12px; color: var(--muted-foreground);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chips { flex: none; display: inline-flex; gap: 8px; }
+  .chip { display: inline-flex; align-items: center; gap: 3px; font-size: 11px;
+    font-weight: 600; }
+  .chip.original { color: var(--original); }
+  .chip.cracked { color: var(--cracked); }
+  .chip.hacked { color: var(--hacked); }
+  .chip.trainer { gap: 2px; padding: 1px 5px; border-radius: 4px; font-size: 10px;
+    color: var(--accent); background: color-mix(in oklch, var(--accent) 15%, transparent); }
+
+  /* Type badge on a lineage row */
+  .badge { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px;
+    border-radius: 5px; font-size: 11px; font-weight: 600; }
+  .badge.original { color: var(--original); background: color-mix(in oklch, var(--original) 15%, transparent); }
+  .badge.cracked { color: var(--cracked); background: color-mix(in oklch, var(--cracked) 15%, transparent); }
+  .badge.hacked { color: var(--hacked); background: color-mix(in oklch, var(--hacked) 15%, transparent); }
+
+  .card-body { border-top: 1px solid var(--border); padding: 2px 12px 8px; }
+  /* Quarantine rows render a .meta directly inside a bare .edition card. */
+  .edition > .meta { padding: 10px 12px; }
+  #list h3 { font-size: 14px; margin: 10px 0 6px; }
+  .meta { color: var(--muted-foreground); font-size: 12px; }
+  .variants { display: none; }
   .variants.open { display: block; }
-  .variant { padding: 4px 0; border-top: 1px solid #23262d; display: flex; justify-content: space-between; }
-  .primary { color: #7ee081; }
+  .variant { padding: 5px 0; border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .primary { color: var(--original); }
   .variant.vcol { display: block; }
   .vrow { display: flex; justify-content: space-between; gap: 12px; }
   .vsub { padding-left: 2px; margin-top: 2px; }
-  .vnode { padding: 6px 0 2px; border-top: 1px solid #23262d; }
-  .vnode .vyear { color: #9aa0aa; font-size: 12px; }
+  .vnode { padding: 8px 0 2px; border-top: 1px solid var(--border); }
+  .vnode:first-child { border-top: 0; }
+  .vnode .vyear { color: var(--muted-foreground); font-size: 12px; }
   .variant.lang { padding-left: 16px; }
-  .demos-split { margin-top: 10px; padding-top: 6px; border-top: 1px dashed #2a2e37;
-    color: #9aa0aa; font-size: 12px; }
-  code { color: #c8cdd6; }
-  a { color: #6db3f2; }
-  .upload-panel { border: 1px solid #2a2e37; border-radius: 8px; margin: 8px 0 16px;
-    padding: 10px 12px; background: #191c22; }
-  .upload-panel h3 { margin: 0 0 8px; font-size: 13px; }
+  .demos-split { margin-top: 10px; padding-top: 6px; border-top: 1px dashed var(--border);
+    color: var(--muted-foreground); font-size: 12px; }
+  code { color: color-mix(in oklch, var(--foreground) 85%, transparent);
+    font-family: ui-monospace, monospace; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .upload-panel { border: 1px solid var(--border); border-radius: var(--radius);
+    margin: 6px 0 16px; padding: 10px 12px;
+    background: color-mix(in oklch, var(--card) 70%, var(--background)); }
+  /* Upload progress: a bar for the bulk + a processed/total counter. */
+  .u-head { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
+  .u-bar { flex: 1; height: 8px; border: 0; border-radius: 999px;
+    background: var(--secondary); appearance: none; -webkit-appearance: none; overflow: hidden; }
+  .u-bar::-webkit-progress-bar { background: var(--secondary); border-radius: 999px; }
+  .u-bar::-webkit-progress-value { background: var(--primary); border-radius: 999px; }
+  .u-bar::-moz-progress-bar { background: var(--primary); border-radius: 999px; }
+  .u-count { flex: none; font-size: 12px; color: var(--muted-foreground);
+    font-variant-numeric: tabular-nums; }
   .u-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0;
-    border-top: 1px solid #23262d; font-size: 12px; }
+    border-top: 1px solid var(--border); font-size: 12px; }
   .u-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .u-status { flex: none; }
-  .s-stored { color: #7ee081; }
-  .s-duplicate { color: #9aa0aa; }
-  .s-quarantined { color: #e0c56e; }
-  .s-rejected { color: #e08a6e; }
-  .s-error { color: #e06e6e; }
-  .s-pending { color: #6b7280; }
-  .u-summary { margin-top: 8px; font-size: 12px; color: #c8cdd6; }
+  .s-quarantined { color: var(--accent); }
+  .s-rejected { color: var(--cracked); }
+  .s-error { color: var(--cracked); }
+  .u-summary { margin-top: 8px; font-size: 12px;
+    color: color-mix(in oklch, var(--foreground) 85%, transparent); }
   .drop-overlay { position: fixed; inset: 0; display: none; align-items: center;
     justify-content: center; text-align: center; padding: 20px; z-index: 50;
-    background: rgba(20,22,26,0.85); border: 3px dashed #6db3f2; color: #e6e8ec; font-size: 20px; }
+    background: color-mix(in oklch, var(--background) 85%, transparent);
+    border: 3px dashed var(--primary); color: var(--foreground); font-size: 20px; }
   .drop-overlay.show { display: flex; }
 </style>
 </head>
 <body>
 <header>
-  <img src="/logo.png" alt="Amiga Disk Vault logo" class="logo">
-  <h1>Amiga Disk Vault</h1>
-</header>
-<main>
+  <div class="head-top">
+    <img src="/logo.png" alt="Amiga Disk Vault logo" class="logo">
+    <div class="head-titles">
+      <h1>Amiga Disk Vault</h1>
+      <p class="subtitle" id="subtitle">catalog</p>
+    </div>
+    <div class="head-actions">
+      <button class="btn" data-ic-pre="plus" onclick="document.getElementById('filePick').click()">Add ADF</button>
+      <button class="btn" data-ic-pre="folder" onclick="document.getElementById('dirPick').click()">Upload folder</button>
+    </div>
+  </div>
   <div class="controls">
-    <input id="q" placeholder="search title…">
+    <label class="search"><span data-ic="search"></span>
+      <input id="q" placeholder="Search titles, groups, ADF files…" aria-label="Search the vault"></label>
     <select id="category"><option value="">all categories</option>
       <option>game</option><option>tool</option><option>demo</option></select>
-    <input id="language" placeholder="lang (en, es…)" size="8">
-    <button onclick="load()">Search</button>
+    <input id="language" placeholder="lang (en, es…)" size="8" aria-label="Filter by language">
+    <div class="seg" id="typeSeg" role="group" aria-label="Filter by type">
+      <button class="seg-btn active" data-t="all" onclick="setType('all')">All</button>
+      <button class="seg-btn" data-t="original" onclick="setType('original')">Original</button>
+      <button class="seg-btn" data-t="cracked" onclick="setType('cracked')">Cracked</button>
+      <button class="seg-btn" data-t="hacked" onclick="setType('hacked')">Hacked</button>
+    </div>
+    <button class="btn" onclick="load()">Search</button>
     <a href="#" onclick="loadQuarantine();return false">Quarantine</a>
     <a href="#" onclick="reidentify();return false">Re-identify</a>
-    <span style="flex:1"></span>
-    <button onclick="document.getElementById('filePick').click()">Upload files</button>
-    <button onclick="document.getElementById('dirPick').click()">Upload folder</button>
   </div>
+  <div class="legend">
+    <span class="t-original"><span data-ic="shield"></span>Original — untouched factory image</span>
+    <span class="t-cracked"><span data-ic="skull"></span>Cracked — protection removed, game unchanged</span>
+    <span class="t-hacked"><span data-ic="wrench"></span>Hacked — game modified (trainer / fixes)</span>
+  </div>
+</header>
+<main>
   <input id="filePick" type="file" multiple hidden>
   <input id="dirPick" type="file" webkitdirectory multiple hidden>
   <div id="uploadPanel" class="upload-panel" hidden></div>
@@ -456,6 +577,46 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <div id="dropOverlay" class="drop-overlay">Drop ADF files or a folder to upload
   <span class="meta" id="dropHint"></span></div>
 <script>
+// Inline SVG icon set (lucide, MIT) — kept in the binary, no CDN or web font.
+const svg = (w, inner) => `<svg width="${w}" height="${w}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+const ICON = {
+  chevron: svg(16, '<path d="m9 18 6-6-6-6"/>'),
+  shield: svg(13, '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>'),
+  skull: svg(13, '<circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><path d="M8 20v2h8v-2"/><path d="M16 20a2 2 0 0 0 1.56-3.25 8 8 0 1 0-11.12 0A2 2 0 0 0 8 20"/>'),
+  wrench: svg(13, '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>'),
+  zap: svg(11, '<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>'),
+  search: svg(15, '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>'),
+  plus: svg(14, '<path d="M5 12h14"/><path d="M12 5v14"/>'),
+  folder: svg(14, '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>'),
+};
+const TYPE_ICON = { original: ICON.shield, cracked: ICON.skull, hacked: ICON.wrench };
+function initIcons() {
+  for (const el of document.querySelectorAll('[data-ic]')) el.innerHTML = ICON[el.dataset.ic] || '';
+  for (const el of document.querySelectorAll('[data-ic-pre]')) el.insertAdjacentHTML('afterbegin', ICON[el.dataset.icPre] || '');
+}
+
+// Colour-coded original/cracked/hacked summary chips for a Work card header.
+function typeChips(x) {
+  let h = '';
+  if (x.original_count) h += `<span class="chip original" title="Original releases">${ICON.shield}${x.original_count}</span>`;
+  if (x.cracked_count) h += `<span class="chip cracked" title="Cracked releases">${ICON.skull}${x.cracked_count}</span>`;
+  if (x.hacked_count) h += `<span class="chip hacked" title="Hacked releases">${ICON.wrench}${x.hacked_count}</span>`;
+  return h;
+}
+// A type badge for one lineage row (original / cracked / hacked).
+function kindBadge(kind) {
+  const label = kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : '';
+  return `<span class="badge ${kind}">${TYPE_ICON[kind] || ''}${label}</span>`;
+}
+// A "+N TRAINER" chip showing the scene trainer tag (e.g. "+3 DC").
+function trainerChip(text) {
+  return `<span class="chip trainer" title="Includes a cheat trainer">${ICON.zap}${text ? esc(text) : 'TRAINER'}</span>`;
+}
+
+// The works fetched by the last search, and the active client-side type filter.
+let LAST_WORKS = [];
+let TYPE_FILTER = 'all';
+
 async function load() {
   const p = new URLSearchParams();
   for (const k of ['q','category','language']) {
@@ -463,8 +624,26 @@ async function load() {
     if (val) p.set(k, val);
   }
   const { works } = await (await fetch('/api/works?' + p)).json();
+  LAST_WORKS = works;
+  // A fresh fetch (search, upload refresh, re-identify) resets the client-side
+  // type filter, so a just-changed title is never hidden by a stale segment.
+  TYPE_FILTER = 'all';
+  for (const b of document.querySelectorAll('.seg-btn')) b.classList.toggle('active', b.dataset.t === 'all');
+  renderWorks();
+}
+// Render (or re-render) the Work cards, applying the client-side type filter.
+function renderWorks() {
+  const works = TYPE_FILTER === 'all'
+    ? LAST_WORKS
+    : LAST_WORKS.filter(w => w[TYPE_FILTER + '_count'] > 0);
+  const total = LAST_WORKS.length;
+  document.getElementById('subtitle').textContent = TYPE_FILTER === 'all'
+    ? `${total} ${total === 1 ? 'title' : 'titles'} in catalog`
+    : `${works.length} of ${total} · ${TYPE_FILTER}`;
   const list = document.getElementById('list');
-  list.innerHTML = works.length ? '' : '<p class=meta>Nothing here. Use "Upload files"/"Upload folder" above, or drag ADFs onto the page.</p>';
+  list.innerHTML = works.length ? '' : (LAST_WORKS.length
+    ? '<p class=meta>No titles match the current type filter.</p>'
+    : '<p class=meta>Nothing here. Use "Add ADF"/"Upload folder" above, or drag ADFs onto the page.</p>');
   for (const w of works) {
     const div = document.createElement('div');
     div.className = 'edition';
@@ -472,18 +651,32 @@ async function load() {
     if (w.game_count) counts.push(w.game_count + ' game');
     if (w.demo_count) counts.push(w.demo_count + ' demo');
     if (w.tool_count) counts.push(w.tool_count + ' tool');
-    div.innerHTML = `<div class="title">${esc(w.name)} <span class="meta">${counts.join(' · ')}</span></div>
-      <div class="variants"></div>`;
+    div.innerHTML = `<button class="card-head" aria-expanded="false">
+        <span class="chevron">${ICON.chevron}</span>
+        <span class="card-title">
+          <span class="title-line">${esc(w.name)}</span>
+          <span class="sub-line">${counts.join(' · ')}</span>
+        </span>
+        <span class="chips">${typeChips(w)}</span>
+      </button>
+      <div class="card-body variants"></div>`;
+    const head = div.querySelector('.card-head');
     const box = div.querySelector('.variants');
-    div.querySelector('.title').style.cursor = 'pointer';
-    div.querySelector('.title').onclick = () => {
-      box.classList.toggle('open');
+    head.onclick = () => {
+      const open = box.classList.toggle('open');
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
       if (box.dataset.loaded) return;
       box.innerHTML = renderWork(w);
       box.dataset.loaded = '1';
     };
     list.appendChild(div);
   }
+}
+// Segmented all/original/cracked/hacked filter: re-render from the fetched works.
+function setType(t) {
+  TYPE_FILTER = t;
+  for (const b of document.querySelectorAll('.seg-btn')) b.classList.toggle('active', b.dataset.t === t);
+  renderWorks();
 }
 // A Work expands to a version timeline for its game releases (one node per
 // version, newest-first, year as a badge; language nests as rows), with demos
@@ -569,8 +762,10 @@ async function renderPlayable(rep) {
   const rows = sets.map(s => {
     const name = s.lineage ? esc(s.lineage) : 'original';
     const star = s.is_recommended ? '★ ' : '';
+    const badge = kindBadge(s.kind) + ' ';
+    const tc = s.trainer ? ' ' + trainerChip(s.trainer) : '';
     if (!s.complete) {
-      return `<div class="variant"><span style="opacity:.55"><code>${name}</code></span>
+      return `<div class="variant"><span style="opacity:.55">${badge}<code>${name}</code></span>
         <span class="meta s-rejected">missing disk ${s.missing_disks.join(',')}</span></div>`;
     }
     const enc = s.lineage ? encodeURIComponent(s.lineage) : '-';
@@ -578,10 +773,10 @@ async function renderPlayable(rep) {
       const key = 'tr' + rep + '_' + (s.lineage || 'orig').replace(/[^A-Za-z0-9]/g, '');
       const opts = s.trainer_options.map(t =>
         `<option value="${esc(t.uid)}"${t.is_default ? ' selected' : ''}>${t.trainer ? esc(t.trainer) : 'no trainer'}</option>`).join('');
-      return `<div class="variant"><span class="${s.is_recommended ? 'primary' : ''}">${star}<code>${name}</code> <select id="${key}">${opts}</select></span>
+      return `<div class="variant"><span class="${s.is_recommended ? 'primary' : ''}">${star}${badge}<code>${name}</code>${tc} <select id="${key}">${opts}</select></span>
         <span class="meta"><span class="primary">complete</span> · <a href="#" onclick="downloadSet(${rep},'${enc}','${key}');return false">download set</a></span></div>`;
     }
-    return `<div class="variant"><span class="${s.is_recommended ? 'primary' : ''}">${star}<code>${name}</code></span>
+    return `<div class="variant"><span class="${s.is_recommended ? 'primary' : ''}">${star}${badge}<code>${name}</code>${tc}</span>
       <span class="meta"><span class="primary">complete</span> · <a href="/export/set/${rep}/${enc}">download set</a></span></div>`;
   }).join('');
   return rows +
@@ -721,40 +916,58 @@ async function runQueue() {
   uRunning = true;
   const panel = document.getElementById('uploadPanel');
   panel.hidden = false;
-  panel.innerHTML = '<h3 id="uHead"></h3><div id="uRows"></div><div class="u-summary" id="uSummary">…</div>';
+  // A progress bar for the bulk; rows are added only for files needing attention.
+  panel.innerHTML = '<div class="u-head"><progress id="uBar" class="u-bar" value="0" max="1"></progress>'
+    + '<span class="u-count" id="uCount"></span></div>'
+    + '<div id="uRows"></div><div class="u-summary" id="uSummary">…</div>';
   uRows = document.getElementById('uRows');
-  const uHead = document.getElementById('uHead');
+  const uBar = document.getElementById('uBar');
+  const uCount = document.getElementById('uCount');
   const uSummary = document.getElementById('uSummary');
   uTally = { stored: 0, duplicate: 0, quarantined: 0, rejected: 0, error: 0 };
-  let done = 0;
+  let processed = 0;
+  // Progress is processed/total; total = done + still-queued, recomputed each step
+  // so a batch that appends mid-run grows the denominator honestly.
+  const setBar = (total) => {
+    uBar.value = processed;
+    uBar.max = Math.max(total, 1);
+    uCount.textContent = `${processed} / ${total}`;
+  };
+  setBar(uQueue.length); // 0 / N before the first file
   while (uQueue.length) {
     const item = uQueue.shift();
-    done++;
-    uHead.textContent = `Uploading ${done + uQueue.length} file(s)`;
-    if (item.kind) { uTally[item.kind]++; addRow(item.name, item.kind, item.status); continue; }
-    const f = item.file;
-    const row = addRow(f.name, 'pending', '…');
-    try {
-      const r = await fetch('/api/upload?filename=' + encodeURIComponent(f.name), { method: 'POST', body: f });
-      if (!r.ok) {
-        if (r.status >= 400 && r.status < 500) { uTally.rejected++; setRow(row, 'rejected', 'rejected'); }
-        else { uTally.error++; setRow(row, 'error', 'error ' + r.status); }
-        continue;
-      }
-      const outs = (await r.json()).outcomes || [];
-      const c = { stored: 0, duplicate: 0, quarantined: 0 };
-      let bad = !outs.length; // empty response is not a success
-      for (const o of outs) {
-        if (o.kind === 'duplicate') c.duplicate++;
-        else if (o.kind === 'stored') (o.quarantined ? c.quarantined++ : c.stored++);
-        else bad = true; // unknown kind → not a success
-      }
-      // Count any real outcomes even if an unknown kind also appeared.
-      uTally.stored += c.stored; uTally.duplicate += c.duplicate; uTally.quarantined += c.quarantined;
-      if (bad) { uTally.error++; setRow(row, 'error', 'unexpected response'); continue; }
-      const cls = c.quarantined ? 'quarantined' : c.stored ? 'stored' : 'duplicate';
-      setRow(row, cls, outs.length > 1 ? fmtCounts(c, ['stored', 'duplicate', 'quarantined'], ', ') : cls);
-    } catch (err) { uTally.error++; setRow(row, 'error', 'error'); }
+    if (item.kind) {
+      // Pre-classified unsupported/unreadable items are exceptions — always shown.
+      uTally[item.kind]++;
+      addRow(item.name, item.kind, item.status);
+    } else {
+      const f = item.file;
+      try {
+        const r = await fetch('/api/upload?filename=' + encodeURIComponent(f.name), { method: 'POST', body: f });
+        if (!r.ok) {
+          if (r.status >= 400 && r.status < 500) { uTally.rejected++; addRow(f.name, 'rejected', 'rejected'); }
+          else { uTally.error++; addRow(f.name, 'error', 'error ' + r.status); }
+        } else {
+          const outs = (await r.json()).outcomes || [];
+          const c = { stored: 0, duplicate: 0, quarantined: 0 };
+          let bad = !outs.length; // empty response is not a success
+          for (const o of outs) {
+            if (o.kind === 'duplicate') c.duplicate++;
+            else if (o.kind === 'stored') (o.quarantined ? c.quarantined++ : c.stored++);
+            else bad = true; // unknown kind → not a success
+          }
+          // Count any real outcomes even if an unknown kind also appeared.
+          uTally.stored += c.stored; uTally.duplicate += c.duplicate; uTally.quarantined += c.quarantined;
+          // Only outcomes needing attention get a row; stored/duplicate advance the bar only.
+          if (bad) { uTally.error++; addRow(f.name, 'error', 'unexpected response'); }
+          else if (c.quarantined) {
+            addRow(f.name, 'quarantined', outs.length > 1 ? fmtCounts(c, ['stored', 'duplicate', 'quarantined'], ', ') : 'quarantined');
+          }
+        }
+      } catch (err) { uTally.error++; addRow(f.name, 'error', 'error'); }
+    }
+    processed++;
+    setBar(processed + uQueue.length); // advance as each file completes
   }
   const summary = fmtCounts(uTally, ['stored', 'duplicate', 'quarantined', 'rejected', 'error'], ' · ') || 'nothing to upload';
   uSummary.innerHTML = 'Done — ' + summary +
@@ -769,11 +982,7 @@ function addRow(name, cls, status) {
   uRows.appendChild(div);
   return div;
 }
-function setRow(row, cls, status) {
-  const s = row.querySelector('.u-status');
-  s.className = 'u-status s-' + cls;
-  s.textContent = status;
-}
+initIcons();
 load();
 </script>
 </body>
@@ -792,5 +1001,71 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::open_memory(dir.path()).unwrap();
         let _router = router(Arc::new(Mutex::new(vault)));
+    }
+
+    #[test]
+    fn index_html_surfaces_type_badges_and_preserves_features() {
+        // The redesign's type surfacing (summary chips, per-lineage badge, trainer
+        // chip, segmented filter) and every preserved surface are in the served UI.
+        for marker in [
+            "typeChips",        // per-Work summary chips
+            "kindBadge",        // per-lineage type badge
+            "trainerChip",      // "+N TRAINER" chip
+            "seg-btn",          // segmented type filter
+            "setType(",         // filter behaviour
+            "renderPlayable",   // playable multi-disk sets preserved
+            "renderVariants",   // per-variant fingerprint inspect preserved
+            "loadQuarantine",   // quarantine preserved
+            "reidentify",       // re-identify preserved
+            "filesFromDrop",    // drag-drop upload preserved
+            "class=\"legend\"", // original/cracked/hacked legend
+            "--original",
+            "--cracked",
+            "--hacked",
+        ] {
+            assert!(
+                INDEX_HTML.contains(marker),
+                "served index missing `{marker}`"
+            );
+        }
+    }
+
+    #[test]
+    fn index_html_upload_uses_progress_bar_with_exceptions_only() {
+        // The upload panel drives a <progress> bar + processed/total counter...
+        for marker in [
+            "<progress", // the bar element
+            "class=\"u-bar\"",
+            "id=\"uCount\"", // the processed/total counter
+            "setBar(",       // the bar update
+            "review quarantine",
+        ] {
+            assert!(
+                INDEX_HTML.contains(marker),
+                "served index missing `{marker}`"
+            );
+        }
+        // ...and only exception outcomes render a row: successes advance the bar
+        // without a pending row, so the old pending-row machinery is gone.
+        assert!(
+            !INDEX_HTML.contains("'pending'"),
+            "upload should no longer create pending rows"
+        );
+        assert!(
+            !INDEX_HTML.contains("function setRow"),
+            "setRow is orphaned once rows are added only on the final outcome"
+        );
+    }
+
+    #[test]
+    fn index_html_is_self_contained() {
+        // No external/CDN dependency: styles, scripts, icons and fonts are inline
+        // or served locally, so the binary embeds the entire UI.
+        for forbidden in ["http://", "https://", "cdn.", "<script src", "<link "] {
+            assert!(
+                !INDEX_HTML.contains(forbidden),
+                "served index has an external reference: `{forbidden}`"
+            );
+        }
     }
 }
