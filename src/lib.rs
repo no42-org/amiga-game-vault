@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-//! Amiga Disk Vault: a self-hosted ROM manager for ADF disk images.
+//! Amiga Disk Vault: a self-hosted catalog for ADF disk images.
 //!
 //! The crate is organized around a small set of composable pieces:
 //! - [`identity`]: content hashing and the content-derived UID.
