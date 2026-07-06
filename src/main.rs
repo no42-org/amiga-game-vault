@@ -7,8 +7,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use amiga_game_vault::service::Vault;
-use amiga_game_vault::web;
+use amiga_disk_vault::service::Vault;
+use amiga_disk_vault::web;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vault = Vault::open(&data_dir)?;
     let state = Arc::new(Mutex::new(vault));
 
-    println!("Amiga Game Vault listening on http://{addr}  (data: {data_dir})");
+    println!("Amiga Disk Vault listening on http://{addr}  (data: {data_dir})");
     web::serve(state, &addr).await?;
     Ok(())
 }

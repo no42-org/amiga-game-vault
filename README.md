@@ -1,4 +1,4 @@
-# Amiga Game Vault
+# Amiga Disk Vault
 
 A self-hosted ROM manager for Amiga **ADF** disk images. It ingests uploads,
 identifies them against reference DATs (or by TOSEC filename), **deduplicates**
@@ -28,8 +28,8 @@ is OCI-compliant and also builds with Podman/Buildah.
 **1. Get the files**
 
 ```bash
-git clone https://github.com/no42-org/amiga-game-vault.git
-cd amiga-game-vault
+git clone https://github.com/no42-org/amiga-disk-vault.git
+cd amiga-disk-vault
 ```
 
 **2. Build and start**
@@ -98,8 +98,25 @@ ports:
 up by copying the volume, e.g.:
 
 ```bash
-docker run --rm -v amiga-game-vault_vault-data:/data -v "$PWD":/backup \
+docker run --rm -v amiga-disk-vault_vault-data:/data -v "$PWD":/backup \
   debian:bookworm-slim tar czf /backup/vault-backup.tar.gz -C /data .
+```
+
+**Migrating data from the old `amiga-game-vault` name** — Compose now pins the
+project to `amiga-disk-vault`, so a fresh `docker compose up` starts an *empty*
+`amiga-disk-vault_vault-data` volume; your existing catalog stays in the old
+volume. Move it once. The old volume is `<old-project>_vault-data`, where
+`<old-project>` was the old checkout's directory name (often `amiga-game-vault`);
+substitute the real name below. Stop the old stack first, and the
+`volume inspect` guard fails fast if the source name is wrong (so you never copy
+from an auto-created empty volume):
+
+```bash
+docker compose down                                 # stop the old stack first
+docker volume inspect amiga-game-vault_vault-data   # aborts here if the name is wrong
+docker volume create amiga-disk-vault_vault-data
+docker run --rm -v amiga-game-vault_vault-data:/from -v amiga-disk-vault_vault-data:/to \
+  alpine sh -c 'cp -a /from/. /to/'
 ```
 
 ---
@@ -134,9 +151,9 @@ docker run --rm -v amiga-game-vault_vault-data:/data -v "$PWD":/backup \
 Requires a Rust toolchain and a C compiler (for the bundled SQLite).
 
 ```bash
-make build            # release binary at target/release/amiga-game-vault
+make build            # release binary at target/release/amiga-disk-vault
 make verify           # build + full test suite
-VAULT_ADDR=127.0.0.1:4500 VAULT_DATA=./data ./target/release/amiga-game-vault
+VAULT_ADDR=127.0.0.1:4500 VAULT_DATA=./data ./target/release/amiga-disk-vault
 ```
 
 ## License

@@ -1,16 +1,16 @@
 [package]
-name = "amiga-game-vault"
+name = "amiga-disk-vault"
 version = "0.1.0"
 edition = "2021"
 description = "Self-hosted ADF ROM manager: ingest, identify, deduplicate and normalize Amiga disk images"
 license = "MIT"
 
 [[bin]]
-name = "amiga-game-vault"
+name = "amiga-disk-vault"
 path = "src/main.rs"
 
 [lib]
-name = "amiga_game_vault"
+name = "amiga_disk_vault"
 path = "src/lib.rs"
 
 [dependencies]
