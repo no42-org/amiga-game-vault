@@ -526,6 +526,43 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .t-cracked { color: var(--cracked); }
   .t-hacked { color: var(--hacked); }
 
+  /* Cover grid */
+  .grid-controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+    margin: 12px 0 0; padding: 8px 12px; border: 1px solid var(--border);
+    border-radius: var(--radius); background: var(--card); font-size: 12px; }
+  .grid-controls label { display: inline-flex; align-items: center; gap: 6px;
+    color: var(--muted-foreground); }
+  .grid { display: grid; gap: 14px; margin-top: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(var(--tile-w, 150px), 1fr)); }
+  .tile { cursor: pointer; }
+  .tile-art { position: relative; aspect-ratio: 3 / 4; overflow: hidden;
+    border-radius: var(--radius); border: 1px solid var(--border); background: var(--secondary); }
+  .tile-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile:hover .tile-art { outline: 2px solid var(--ring); outline-offset: -1px; }
+  .tile-fallback { display: flex; align-items: center; justify-content: center;
+    height: 100%; padding: 10px; text-align: center; font-weight: 700; font-size: 15px;
+    line-height: 1.2; color: oklch(0.98 0 0); text-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  .tile-cap { margin-top: 6px; }
+  .tile-name { font-weight: 600; font-size: 12px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .tile-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin-top: 2px; font-size: 11px; color: var(--muted-foreground); }
+  .grid-group-h { grid-column: 1 / -1; font-size: 13px; font-weight: 600;
+    margin: 14px 0 0; padding-bottom: 4px; color: var(--muted-foreground);
+    border-bottom: 1px solid var(--border); }
+  .grid-group-h:first-child { margin-top: 0; }
+
+  /* Detail overlay (grid tile click) */
+  .overlay-bg { position: fixed; inset: 0; z-index: 60; display: none;
+    background: color-mix(in oklch, var(--background) 70%, transparent); backdrop-filter: blur(4px); }
+  .overlay-bg.show { display: block; }
+  .overlay-panel { position: fixed; z-index: 61; top: 5vh; left: 50%; transform: translateX(-50%);
+    width: min(900px, 92vw); max-height: 90vh; overflow: auto; padding: 14px 16px;
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+  .overlay-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .overlay-close { margin-left: auto; flex: none; }
+
   /* Work cards */
   .edition { border: 1px solid var(--border); border-radius: var(--radius);
     background: var(--card); margin: 6px 0; overflow: hidden; }
@@ -647,6 +684,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
       <button class="seg-btn" data-t="cracked" onclick="setType('cracked')">Cracked</button>
       <button class="seg-btn" data-t="hacked" onclick="setType('hacked')">Hacked</button>
     </div>
+    <div class="seg" id="viewSeg" role="group" aria-label="View">
+      <button class="seg-btn" data-v="list" onclick="setView('list')">List</button>
+      <button class="seg-btn" data-v="grid" onclick="setView('grid')">Grid</button>
+    </div>
     <button class="btn" onclick="load()">Search</button>
     <a href="#" onclick="loadQuarantine();return false">Quarantine</a>
     <a href="#" onclick="reidentify();return false">Re-identify</a>
@@ -661,9 +702,24 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <main>
   <input id="filePick" type="file" multiple hidden>
   <input id="dirPick" type="file" webkitdirectory multiple hidden>
+  <div id="gridControls" class="grid-controls" hidden>
+    <label>Size <input type="range" id="gcSize" min="110" max="240" step="10"></label>
+    <label>Sort <select id="gcSort">
+      <option value="title">Title</option><option value="year">Year</option>
+      <option value="publisher">Publisher</option><option value="genre">Genre</option>
+      <option value="completeness">Completeness</option></select></label>
+    <label>Group <select id="gcGroup">
+      <option value="none">Don't group</option><option value="genre">Genre</option>
+      <option value="publisher">Publisher</option><option value="category">Category</option>
+      <option value="decade">Decade</option></select></label>
+    <label><input type="checkbox" id="gcTitle"> Title</label>
+    <label><input type="checkbox" id="gcComplete"> Completeness</label>
+  </div>
   <div id="uploadPanel" class="upload-panel" hidden></div>
   <div id="list"></div>
 </main>
+<div id="overlayBg" class="overlay-bg" onclick="closeOverlay()"></div>
+<div id="overlayPanel" class="overlay-panel" style="display:none"></div>
 <div id="dropOverlay" class="drop-overlay">Drop ADF files or a folder to upload
   <span class="meta" id="dropHint"></span></div>
 <script>
@@ -707,6 +763,40 @@ function trainerChip(text) {
 let LAST_WORKS = [];
 let TYPE_FILTER = 'all';
 
+// --- View (list/grid) + grid options, persisted client-side ---------------
+let VIEW = localStorage.getItem('vault.view') || 'list';
+const GRID_DEFAULTS = { size: 150, sort: 'title', group: 'none', capTitle: true, capComplete: false };
+// Tolerate a corrupt/old-shape persisted value — a bad parse must not abort the
+// whole page bootstrap, it just falls back to defaults.
+function readGrid() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('vault.grid') || '{}') || {}; } catch (e) { saved = {}; }
+  const g = Object.assign({}, GRID_DEFAULTS, saved);
+  g.size = Math.min(240, Math.max(110, +g.size || GRID_DEFAULTS.size)); // clamp to the slider range
+  return g;
+}
+let GRID = readGrid();
+const saveGrid = () => localStorage.setItem('vault.grid', JSON.stringify(GRID));
+function setView(v) { VIEW = v; localStorage.setItem('vault.view', v); render(); }
+// Dispatch to the active view; both render the same type-filtered works.
+function render() {
+  if (VIEW === 'grid') renderGrid(); else renderWorks();
+  for (const b of document.querySelectorAll('#viewSeg .seg-btn')) b.classList.toggle('active', b.dataset.v === VIEW);
+  document.getElementById('gridControls').hidden = VIEW !== 'grid';
+}
+// Works passing the client-side type filter (shared by list + grid).
+const filteredWorks = () => TYPE_FILTER === 'all'
+  ? LAST_WORKS : LAST_WORKS.filter(w => w[TYPE_FILTER + '_count'] > 0);
+function setSubtitle(shown) {
+  const total = LAST_WORKS.length;
+  document.getElementById('subtitle').textContent = TYPE_FILTER === 'all'
+    ? `${total} ${total === 1 ? 'title' : 'titles'} in catalog`
+    : `${shown} of ${total} · ${TYPE_FILTER}`;
+}
+const emptyMsg = () => LAST_WORKS.length
+  ? '<p class=meta>No titles match the current type filter.</p>'
+  : '<p class=meta>Nothing here. Use "Add ADF"/"Upload folder" above, or drag ADFs onto the page.</p>';
+
 async function load() {
   const p = new URLSearchParams();
   for (const k of ['q','category','language']) {
@@ -718,34 +808,23 @@ async function load() {
   // A fresh fetch (search, upload refresh, re-identify) resets the client-side
   // type filter, so a just-changed title is never hidden by a stale segment.
   TYPE_FILTER = 'all';
-  for (const b of document.querySelectorAll('.seg-btn')) b.classList.toggle('active', b.dataset.t === 'all');
-  renderWorks();
+  for (const b of document.querySelectorAll('#typeSeg .seg-btn')) b.classList.toggle('active', b.dataset.t === 'all');
+  render();
 }
 // Render (or re-render) the Work cards, applying the client-side type filter.
 function renderWorks() {
-  const works = TYPE_FILTER === 'all'
-    ? LAST_WORKS
-    : LAST_WORKS.filter(w => w[TYPE_FILTER + '_count'] > 0);
-  const total = LAST_WORKS.length;
-  document.getElementById('subtitle').textContent = TYPE_FILTER === 'all'
-    ? `${total} ${total === 1 ? 'title' : 'titles'} in catalog`
-    : `${works.length} of ${total} · ${TYPE_FILTER}`;
+  const works = filteredWorks();
+  setSubtitle(works.length);
   const list = document.getElementById('list');
-  list.innerHTML = works.length ? '' : (LAST_WORKS.length
-    ? '<p class=meta>No titles match the current type filter.</p>'
-    : '<p class=meta>Nothing here. Use "Add ADF"/"Upload folder" above, or drag ADFs onto the page.</p>');
+  list.innerHTML = works.length ? '' : emptyMsg();
   for (const w of works) {
     const div = document.createElement('div');
     div.className = 'edition';
-    const counts = [];
-    if (w.game_count) counts.push(w.game_count + ' game');
-    if (w.demo_count) counts.push(w.demo_count + ' demo');
-    if (w.tool_count) counts.push(w.tool_count + ' tool');
     div.innerHTML = `<button class="card-head" aria-expanded="false">
         <span class="chevron">${ICON.chevron}</span>
         <span class="card-title">
           <span class="title-line">${esc(w.name)}</span>
-          <span class="sub-line">${counts.join(' · ')}</span>
+          <span class="sub-line">${workCounts(w)}</span>
         </span>
         <span class="chips">${typeChips(w)}</span>
       </button>
@@ -765,8 +844,115 @@ function renderWorks() {
 // Segmented all/original/cracked/hacked filter: re-render from the fetched works.
 function setType(t) {
   TYPE_FILTER = t;
-  for (const b of document.querySelectorAll('.seg-btn')) b.classList.toggle('active', b.dataset.t === t);
-  renderWorks();
+  for (const b of document.querySelectorAll('#typeSeg .seg-btn')) b.classList.toggle('active', b.dataset.t === t);
+  render();
+}
+
+// --- Cover grid ------------------------------------------------------------
+// Work-level facets derived from the loaded works (no extra fetch).
+const workCounts = w => [
+  w.game_count && w.game_count + ' game', w.demo_count && w.demo_count + ' demo',
+  w.tool_count && w.tool_count + ' tool'].filter(Boolean).join(' · ');
+const workYear = w => { const ys = w.releases.map(r => r.year).filter(y => y != null); return ys.length ? Math.min(...ys) : null; };
+const workPublisher = w => { const r = workRep(w); return (r && r.publisher) || ''; };
+const workGenre = w => { const r = workRep(w); return (r && r.meta && r.meta.genre) ? r.meta.genre.split(',')[0].trim() : ''; };
+const workComplete = w => w.releases.some(r => r.complete_lineages > 0);
+const workCategory = w => w.game_count ? 'game' : w.demo_count ? 'demo' : 'tool';
+// A stable hue (0..359) from the work name, for the coverless fallback tile.
+function hashHue(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; }
+
+function tileHtml(w, i) {
+  const rep = workRep(w);
+  const cover = rep && rep.meta && rep.meta.cover_sha1;
+  const art = cover
+    ? `<img loading="lazy" src="/media/${cover}" alt="${esc(w.name)} cover">`
+    : `<div class="tile-fallback" style="background:oklch(0.5 0.13 ${hashHue(w.name)})">${esc(w.name)}</div>`;
+  let cap = '';
+  if (GRID.capTitle) cap += `<div class="tile-name" title="${esc(w.name)}">${esc(w.name)}</div>`;
+  const badges = [typeChips(w)];
+  if (GRID.capComplete) badges.unshift(workComplete(w)
+    ? '<span class="primary">✓ complete</span>' : '<span>⚠ incomplete</span>');
+  const b = badges.filter(Boolean).join(' ');
+  if (b) cap += `<div class="tile-badges">${b}</div>`;
+  return `<div class="tile" data-i="${i}"><div class="tile-art">${art}</div><div class="tile-cap">${cap}</div></div>`;
+}
+function gridSorter(key) {
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  if (key === 'year') return (a, b) => (workYear(b) || -1) - (workYear(a) || -1) || byName(a, b);
+  if (key === 'publisher') return (a, b) => workPublisher(a).localeCompare(workPublisher(b)) || byName(a, b);
+  if (key === 'genre') return (a, b) => workGenre(a).localeCompare(workGenre(b)) || byName(a, b);
+  if (key === 'completeness') return (a, b) => (workComplete(b) - workComplete(a)) || byName(a, b);
+  return byName;
+}
+function groupKey(w, by) {
+  if (by === 'genre') return workGenre(w) || 'Unknown';
+  if (by === 'publisher') return workPublisher(w) || 'Unknown';
+  if (by === 'category') return workCategory(w);
+  if (by === 'decade') { const y = workYear(w); return y != null ? `${Math.floor(y / 10) * 10}s` : 'Unknown'; }
+  return '';
+}
+// The works currently shown in the grid (index target for tile clicks).
+let SHOWN = [];
+function renderGrid() {
+  const works = filteredWorks();
+  setSubtitle(works.length);
+  const list = document.getElementById('list');
+  if (!works.length) { SHOWN = []; list.innerHTML = emptyMsg(); return; }
+  const sorted = works.slice().sort(gridSorter(GRID.sort));
+  // SHOWN is built in emit order so each tile's data-i indexes straight back to
+  // its work on click (no separate index arrays).
+  SHOWN = [];
+  const tile = w => tileHtml(w, SHOWN.push(w) - 1);
+  let body;
+  if (GRID.group === 'none') {
+    body = sorted.map(tile).join('');
+  } else {
+    const groups = new Map();
+    for (const w of sorted) {
+      const k = groupKey(w, GRID.group);
+      let arr = groups.get(k);
+      if (!arr) groups.set(k, arr = []);
+      arr.push(w);
+    }
+    body = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([name, ws]) => `<div class="grid-group-h">${esc(name)} · ${ws.length}</div>` + ws.map(tile).join(''))
+      .join('');
+  }
+  list.innerHTML = `<div class="grid" style="--tile-w:${GRID.size}px">${body}</div>`;
+  for (const el of list.querySelectorAll('.tile')) el.onclick = () => openWorkOverlay(SHOWN[+el.dataset.i]);
+}
+// Tile click → the full Work detail in an overlay, reusing renderWork().
+function openWorkOverlay(w) {
+  if (!w) return;
+  const panel = document.getElementById('overlayPanel');
+  panel.innerHTML = `<div class="overlay-head">
+      <span class="card-title" style="min-width:0">
+        <span class="title-line">${esc(w.name)}</span>
+        <span class="sub-line">${workCounts(w)}</span>
+      </span>
+      <button class="btn overlay-close" onclick="closeOverlay()">Close</button>
+    </div>
+    <div class="card-body">${renderWork(w)}</div>`;
+  document.getElementById('overlayBg').classList.add('show');
+  panel.style.display = 'block';
+}
+function closeOverlay() {
+  document.getElementById('overlayBg').classList.remove('show');
+  document.getElementById('overlayPanel').style.display = 'none';
+}
+// Wire the grid-options controls to the persisted GRID state and re-render.
+function initGridControls() {
+  const rerender = () => { saveGrid(); if (VIEW === 'grid') renderGrid(); };
+  const num = document.getElementById('gcSize'); num.value = GRID.size;
+  num.oninput = () => { GRID.size = +num.value; rerender(); };
+  const sort = document.getElementById('gcSort'); sort.value = GRID.sort;
+  sort.onchange = () => { GRID.sort = sort.value; rerender(); };
+  const group = document.getElementById('gcGroup'); group.value = GRID.group;
+  group.onchange = () => { GRID.group = group.value; rerender(); };
+  const capT = document.getElementById('gcTitle'); capT.checked = GRID.capTitle;
+  capT.onchange = () => { GRID.capTitle = capT.checked; rerender(); };
+  const capC = document.getElementById('gcComplete'); capC.checked = GRID.capComplete;
+  capC.onchange = () => { GRID.capComplete = capC.checked; rerender(); };
 }
 // A Work expands to a version timeline for its game releases (one node per
 // version, newest-first, year as a badge; language nests as rows), with demos
@@ -941,7 +1127,10 @@ async function reidentify() {
 // metadata AND the Enrich button's target come from this one release, so the
 // button always acts on the title whose data is displayed.
 function workRep(w) {
-  return w.releases.find(r => r.category === 'game' && r.meta)
+  // Memoized on the work: the grid sort/group/tile paths call this repeatedly per
+  // render, and each call scans releases. Works are fresh objects per fetch.
+  if ('_rep' in w) return w._rep;
+  return w._rep = w.releases.find(r => r.category === 'game' && r.meta)
     || w.releases.find(r => r.category === 'game')
     || w.releases.find(r => r.meta)
     || w.releases[0];
@@ -1023,7 +1212,7 @@ window.addEventListener('drop', async e => {
   uploadAll(files, errors);
 });
 // A drag canceled with Esc fires no dragleave/drop in some browsers.
-window.addEventListener('keydown', e => { if (e.key === 'Escape') resetDrag(); });
+window.addEventListener('keydown', e => { if (e.key === 'Escape') { resetDrag(); closeOverlay(); } });
 
 // Collect dropped files, recursing folders where the directory API exists.
 // Unreadable files/dirs are surfaced as errors, not silently dropped.
@@ -1131,6 +1320,7 @@ function addRow(name, cls, status) {
   return div;
 }
 initIcons();
+initGridControls();
 load();
 </script>
 </body>
@@ -1170,10 +1360,16 @@ mod tests {
             "--original",
             "--cracked",
             "--hacked",
-            "metaBlock",   // enrichment block (genre/description/screenshots)
-            "enrichWork(", // per-work enrich action
-            "enrichAll(",  // bulk enrich action
-            "/media/",     // local screenshot route
+            "metaBlock",           // enrichment block (genre/description/screenshots)
+            "enrichWork(",         // per-work enrich action
+            "enrichAll(",          // bulk enrich action
+            "/media/",             // local screenshot route
+            "setView(",            // grid/list view toggle
+            "renderGrid",          // cover grid renderer
+            "id=\"gridControls\"", // grid options bar
+            "tile-art",            // portrait cover tile
+            "tile-fallback",       // generated coverless tile
+            "openWorkOverlay",     // tile-click detail overlay
         ] {
             assert!(
                 INDEX_HTML.contains(marker),

@@ -19,6 +19,7 @@ use crate::Result;
 
 const MIGRATION: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_enrichment.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_screenshot_kind.sql");
 
 /// The disk count of a set and its sibling Editions as `(edition_id, disk_no)`.
 type SetSiblings = (Option<u32>, Vec<(i64, Option<u32>)>);
@@ -26,8 +27,9 @@ type SetSiblings = (Option<u32>, Vec<(i64, Option<u32>)>);
 /// An enrichment target: `(title_id, name, category, earliest_artifact_year)`.
 pub type EnrichTarget = (i64, String, String, Option<i32>);
 
-/// A screenshot row to store: `(blob_sha1, mime, caption, source, ord)`.
-pub type StoredShot = (String, String, Option<String>, String, i64);
+/// A screenshot row to store: `(blob_sha1, mime, caption, source, ord, kind)`.
+/// `kind` is `"cover"` or `"screenshot"`.
+pub type StoredShot = (String, String, Option<String>, String, i64, String);
 
 /// A new artifact row to insert.
 #[derive(Debug, Clone, Default)]
@@ -85,6 +87,9 @@ pub struct TitleMeta {
     pub sources: Option<String>,
     /// Canonical page on the winning provider.
     pub external_url: Option<String>,
+    /// Blob sha1 of the front cover (`kind='cover'`), if captured; drives the grid.
+    pub cover_sha1: Option<String>,
+    /// Gameplay screenshots (`kind='screenshot'` only), for the detail view.
     pub screenshots: Vec<Screenshot>,
 }
 
@@ -168,6 +173,18 @@ impl Db {
         // Additive enrichment tables (0002). Idempotent CREATE ... IF NOT EXISTS,
         // so this is safe to run on both fresh and existing databases.
         self.conn.execute_batch(MIGRATION_0002)?;
+        // Screenshot `kind` (0003). ALTER ADD COLUMN is not idempotent, so run it
+        // only when the column is absent (covers both fresh 0002 tables and
+        // pre-0003 databases); existing rows default to 'screenshot'.
+        let has_kind = self
+            .conn
+            .prepare("PRAGMA table_info(title_screenshot)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|c| c == "kind");
+        if !has_kind {
+            self.conn.execute_batch(MIGRATION_0003)?;
+        }
         // Bring an `edition` table created before `qualifier` up to the current
         // schema. A plain ALTER ADD COLUMN can't rebuild the UNIQUE constraint
         // (which must now include `qualifier`), so rebuild the table when the
@@ -734,12 +751,15 @@ impl Db {
         Ok(rows)
     }
 
-    /// Persist a title's merged metadata and (optionally) replace its screenshots
-    /// in a single transaction, so the two halves of one enrichment record can't
-    /// be left inconsistent. `shots = None` leaves the existing screenshots
-    /// untouched (the caller uses this when a re-enrich downloaded none, so a
-    /// transient image-fetch failure doesn't wipe good screenshots); `Some(&[])`
-    /// clears them.
+    /// Persist a title's merged metadata and replace its images in a single
+    /// transaction, so the halves of one enrichment record can't be left
+    /// inconsistent. Replacement is **per kind**: `replace_cover` /
+    /// `replace_screenshot` each gate a DELETE of that kind followed by inserting
+    /// the matching `rows`. A caller that downloaded no images of a kind (a
+    /// transient fetch failure) passes `false` for it, so good existing rows of
+    /// that kind survive — a re-enrich that yields screenshots but no cover does
+    /// not wipe the cover, and vice versa. `rows` must contain only kinds being
+    /// replaced.
     #[allow(clippy::too_many_arguments)]
     pub fn save_enrichment(
         &self,
@@ -751,7 +771,9 @@ impl Db {
         external_url: Option<&str>,
         match_score: Option<f64>,
         fetched_at: i64,
-        shots: Option<&[StoredShot]>,
+        replace_cover: bool,
+        replace_screenshot: bool,
+        rows: &[StoredShot],
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -764,18 +786,24 @@ impl Db {
                  match_score=excluded.match_score, fetched_at=excluded.fetched_at",
             params![title_id, genre, description, year, sources, external_url, match_score, fetched_at],
         )?;
-        if let Some(shots) = shots {
+        if replace_cover {
             tx.execute(
-                "DELETE FROM title_screenshot WHERE title_id = ?1",
+                "DELETE FROM title_screenshot WHERE title_id = ?1 AND kind = 'cover'",
                 [title_id],
             )?;
-            for (sha1, mime, caption, source, ord) in shots {
-                tx.execute(
-                    "INSERT INTO title_screenshot (title_id, blob_sha1, mime, caption, source, ord)
-                     VALUES (?1,?2,?3,?4,?5,?6)",
-                    params![title_id, sha1, mime, caption, source, ord],
-                )?;
-            }
+        }
+        if replace_screenshot {
+            tx.execute(
+                "DELETE FROM title_screenshot WHERE title_id = ?1 AND kind = 'screenshot'",
+                [title_id],
+            )?;
+        }
+        for (sha1, mime, caption, source, ord, kind) in rows {
+            tx.execute(
+                "INSERT INTO title_screenshot (title_id, blob_sha1, mime, caption, source, ord, kind)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![title_id, sha1, mime, caption, source, ord, kind],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -784,10 +812,12 @@ impl Db {
     /// Column list read by [`Self::map_meta`] (shared by the single and batch reads).
     const TITLE_META_COLS: &'static str =
         "title_id, genre, description, year, sources, external_url";
-    /// Column list read by [`Self::map_shot`] (shared by the single and batch reads).
-    const SCREENSHOT_COLS: &'static str = "title_id, blob_sha1, mime, caption, source";
+    /// Column list read by the screenshot readers (`title_id, blob_sha1, mime,
+    /// caption, source` are read by [`Self::map_shot`]; `kind` distinguishes
+    /// cover from screenshot).
+    const SCREENSHOT_COLS: &'static str = "title_id, blob_sha1, mime, caption, source, kind";
 
-    /// Merged metadata (with screenshots) for a single title, if enriched.
+    /// Merged metadata (cover + screenshots) for a single title, if enriched.
     pub fn title_meta(&self, title_id: i64) -> Result<Option<TitleMeta>> {
         let mut meta = self
             .conn
@@ -802,8 +832,22 @@ impl Db {
             .optional()?;
         if let Some(m) = meta.as_mut() {
             m.screenshots = self.screenshots(title_id)?;
+            m.cover_sha1 = self.cover_sha1(title_id)?;
         }
         Ok(meta)
+    }
+
+    /// Blob sha1 of a title's front cover (`kind='cover'`), if any.
+    pub fn cover_sha1(&self, title_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT blob_sha1 FROM title_screenshot
+                 WHERE title_id = ?1 AND kind = 'cover' LIMIT 1",
+                [title_id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// Metadata (with screenshots) for the given titles, keyed by title_id — a
@@ -829,21 +873,30 @@ impl Db {
             Self::SCREENSHOT_COLS
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(ids), |r| {
-            Ok((r.get::<_, i64>(0)?, Self::map_shot(r)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(5)?,
+                Self::map_shot(r)?,
+            ))
         })?;
         for row in rows {
-            let (tid, shot) = row?;
+            let (tid, kind, shot) = row?;
             if let Some(m) = by_title.get_mut(&tid) {
-                m.screenshots.push(shot);
+                if kind == "cover" {
+                    m.cover_sha1 = Some(shot.sha1);
+                } else {
+                    m.screenshots.push(shot);
+                }
             }
         }
         Ok(by_title)
     }
 
-    /// A title's screenshots, ordered.
+    /// A title's gameplay screenshots (`kind='screenshot'`, not the cover), ordered.
     pub fn screenshots(&self, title_id: i64) -> Result<Vec<Screenshot>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM title_screenshot WHERE title_id = ?1 ORDER BY ord, id",
+            "SELECT {} FROM title_screenshot
+             WHERE title_id = ?1 AND kind = 'screenshot' ORDER BY ord, id",
             Self::SCREENSHOT_COLS
         ))?;
         let rows = stmt
@@ -872,6 +925,7 @@ impl Db {
             year: r.get(3)?,
             sources: r.get(4)?,
             external_url: r.get(5)?,
+            cover_sha1: None,
             screenshots: Vec::new(),
         })
     }
@@ -969,9 +1023,21 @@ mod tests {
         assert_eq!(db.titles_for_enrich(None, false).unwrap().len(), 1);
         assert_eq!(db.titles_for_enrich(Some(tid), false).unwrap().len(), 1);
 
-        let shots: Vec<StoredShot> = vec![
-            ("aa".into(), "image/png".into(), None, "openretro".into(), 0),
-            ("bb".into(), "image/png".into(), None, "openretro".into(), 1),
+        let shot = |sha1: &str, kind: &str| -> StoredShot {
+            (
+                sha1.into(),
+                "image/png".into(),
+                None,
+                "openretro".into(),
+                0,
+                kind.into(),
+            )
+        };
+        // Initial: write a cover + two screenshots (replace both kinds).
+        let rows = [
+            shot("cover", "cover"),
+            shot("aa", "screenshot"),
+            shot("bb", "screenshot"),
         ];
         db.save_enrichment(
             tid,
@@ -982,22 +1048,47 @@ mod tests {
             Some("url"),
             Some(0.9),
             1,
-            Some(&shots),
+            true,
+            true,
+            &rows,
         )
         .unwrap();
         let m = db.title_meta(tid).unwrap().unwrap();
         assert_eq!(m.genre.as_deref(), Some("flight"));
-        assert_eq!(m.screenshots.len(), 2);
+        assert_eq!(m.screenshots.len(), 2, "screenshots exclude the cover");
+        assert_eq!(
+            m.cover_sha1.as_deref(),
+            Some("cover"),
+            "cover surfaced separately"
+        );
+        // The batch reader splits cover from screenshots the same way.
+        let batch = db.title_meta_for(&[tid]).unwrap();
+        assert_eq!(batch[&tid].cover_sha1.as_deref(), Some("cover"));
+        assert_eq!(batch[&tid].screenshots.len(), 2);
 
-        // Re-enrich with `None` keeps existing screenshots (transient fetch fail),
-        // while metadata still updates — the two are one atomic write.
-        db.save_enrichment(tid, Some("shooter"), None, None, None, None, None, 2, None)
-            .unwrap();
+        // Transient failure of both kinds (replace neither): everything preserved,
+        // metadata still updates — one atomic write.
+        db.save_enrichment(
+            tid,
+            Some("shooter"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            2,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let m = db.title_meta(tid).unwrap().unwrap();
         assert_eq!(m.genre.as_deref(), Some("shooter"), "meta updated");
-        assert_eq!(m.screenshots.len(), 2, "screenshots preserved on None");
+        assert_eq!(m.screenshots.len(), 2, "screenshots preserved");
+        assert_eq!(m.cover_sha1.as_deref(), Some("cover"), "cover preserved");
 
-        // `Some(&[])` explicitly clears them.
+        // Re-enrich yields a screenshot but no cover: replace screenshots only —
+        // the existing cover must survive (the per-kind no-wipe guarantee).
         db.save_enrichment(
             tid,
             Some("shooter"),
@@ -1007,10 +1098,37 @@ mod tests {
             None,
             None,
             3,
-            Some(&[]),
+            false,
+            true,
+            &[shot("cc", "screenshot")],
         )
         .unwrap();
-        assert_eq!(db.title_meta(tid).unwrap().unwrap().screenshots.len(), 0);
+        let m = db.title_meta(tid).unwrap().unwrap();
+        assert_eq!(m.screenshots.len(), 1, "screenshots replaced");
+        assert_eq!(
+            m.cover_sha1.as_deref(),
+            Some("cover"),
+            "cover NOT wiped by a cover-less re-enrich"
+        );
+
+        // Explicitly clear both kinds (replace both with nothing).
+        db.save_enrichment(
+            tid,
+            Some("shooter"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            4,
+            true,
+            true,
+            &[],
+        )
+        .unwrap();
+        let m = db.title_meta(tid).unwrap().unwrap();
+        assert_eq!(m.screenshots.len(), 0);
+        assert_eq!(m.cover_sha1, None, "explicit clear removes the cover too");
 
         // Now enriched, skip_fetched excludes it.
         assert!(db.titles_for_enrich(None, true).unwrap().is_empty());
