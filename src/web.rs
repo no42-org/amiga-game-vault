@@ -486,7 +486,8 @@ function renderReleaseRow(r) {
   if (r.language) bits.push(r.language);
   const meta = bits.length ? ' · ' + bits.join(' · ') : '';
   if (r.category === 'game') {
-    const disks = `${r.disks_present.length}/${r.disk_count || r.disks_present.length} disks`;
+    const total = r.disk_count || r.disks_present.length;
+    const disks = total > 1 ? `${r.disks_present.length}/${total} disks` : 'disk';
     return `<div class="variant">
         <span style="cursor:pointer" onclick="togglePlayable(${r.rep_edition_id})"><b>game</b>${meta} · ${disks} ▸</span>
         <span class="meta">${r.complete_lineages} playable set(s)</span></div>
@@ -537,7 +538,7 @@ async function toggleDisks(rep) {
   if (box.dataset.loaded) return;
   const { disks } = await (await fetch(`/api/sets/${rep}/lineages`)).json();
   box.innerHTML = (disks || []).map(d => `<div class="variant">
-      <span style="cursor:pointer" onclick="expandDisk(${d.edition_id})">Disk ${d.disk_no} ▸</span>
+      <span style="cursor:pointer" onclick="expandDisk(${d.edition_id})">${d.disk_no ? 'Disk ' + d.disk_no : 'disk'} ▸</span>
       <span class="meta"><a href="/export/edition/${d.edition_id}">export disk</a></span></div>
     <div class="variants" id="dv${d.edition_id}"></div>`).join('');
   box.dataset.loaded = '1';
