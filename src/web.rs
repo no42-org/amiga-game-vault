@@ -229,13 +229,27 @@ async fn enrich_title(
     Ok(Json(serde_json::json!({ "report": report, "meta": meta })))
 }
 
+/// Single-flight guard so overlapping "Enrich all" clicks can't launch parallel
+/// background crawls that hammer the providers and race on the same titles.
+static BULK_ENRICH_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Bulk-enrich every not-yet-enriched title in the background; returns at once.
+/// If a bulk run is already in flight, this is a no-op (`started: false`).
 async fn enrich_all(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppErr> {
+    use std::sync::atomic::Ordering;
+    if BULK_ENRICH_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(Json(serde_json::json!({ "started": false, "busy": true })));
+    }
     let bg = state.clone();
     tokio::spawn(async move {
         if let Err(e) = crate::enrich::run(bg, None, true).await {
             eprintln!("bulk enrich failed: {e}");
         }
+        BULK_ENRICH_RUNNING.store(false, Ordering::Release);
     });
     Ok(Json(serde_json::json!({ "started": true })))
 }
@@ -922,21 +936,22 @@ async function reidentify() {
   note.textContent = `Re-identified — scanned ${rep.scanned}, moved ${rep.moved}, removed ${rep.editions_removed} edition(s) / ${rep.titles_removed} title(s).`;
   document.getElementById('list').prepend(note);
 }
-// The release whose enrichment represents the Work (prefer a game), and its
-// title_id — the key the enrich endpoint acts on.
-function workMeta(w) {
-  const r = w.releases.find(r => r.category === 'game' && r.meta) || w.releases.find(r => r.meta);
-  return r ? r.meta : null;
-}
-function workTitleId(w) {
-  const r = w.releases.find(r => r.category === 'game') || w.releases[0];
-  return r && r.title_id;
+// The single release that represents the Work for enrichment: prefer an enriched
+// game, else any game, else any enriched release, else the first. Both the shown
+// metadata AND the Enrich button's target come from this one release, so the
+// button always acts on the title whose data is displayed.
+function workRep(w) {
+  return w.releases.find(r => r.category === 'game' && r.meta)
+    || w.releases.find(r => r.category === 'game')
+    || w.releases.find(r => r.meta)
+    || w.releases[0];
 }
 // Enrichment header + body: genre badge, an Enrich/Re-enrich button, provider
 // provenance, description, and a local screenshot strip (relative /media URLs).
 function metaBlock(w) {
-  const m = workMeta(w);
-  const tid = workTitleId(w);
+  const rep = workRep(w);
+  const m = rep ? rep.meta : null;
+  const tid = rep && rep.title_id;
   let head = '<div class="enrich-head">';
   if (m && m.genre) head += `<span class="genre">${esc(m.genre)}</span>`;
   head += `<button class="btn btn-sm" onclick="enrichWork(${tid}, this)">${m ? 'Re-enrich' : 'Enrich'}</button>`;

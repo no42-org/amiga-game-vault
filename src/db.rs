@@ -26,6 +26,9 @@ type SetSiblings = (Option<u32>, Vec<(i64, Option<u32>)>);
 /// An enrichment target: `(title_id, name, category, earliest_artifact_year)`.
 pub type EnrichTarget = (i64, String, String, Option<i32>);
 
+/// A screenshot row to store: `(blob_sha1, mime, caption, source, ord)`.
+pub type StoredShot = (String, String, Option<String>, String, i64);
+
 /// A new artifact row to insert.
 #[derive(Debug, Clone, Default)]
 pub struct NewArtifact {
@@ -703,7 +706,7 @@ impl Db {
 
     // --- Enrichment --------------------------------------------------------
 
-    /// Titles to enrich: `only = Some(id)` targets one title, else all titles.
+    /// Titles to enrich: `only = Some(id)` targets one title, `None` all titles.
     /// `skip_fetched` excludes titles that already carry a `title_meta` row.
     /// Returns `(title_id, name, category, year)`; `year` is the earliest known
     /// artifact year for the title, a matching hint for providers.
@@ -712,26 +715,33 @@ impl Db {
         only: Option<i64>,
         skip_fetched: bool,
     ) -> Result<Vec<EnrichTarget>> {
+        // `?1 IS NULL` (not `= 0`) means "no id filter"; binding `only` directly
+        // keeps 0 a normal id, so `Some(0)` can't accidentally match every title.
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.name, t.category,
                     (SELECT MIN(a.year) FROM artifact a JOIN edition e ON a.edition_id = e.id
                      WHERE e.title_id = t.id AND a.year IS NOT NULL) AS yr
              FROM title t
-             WHERE (?1 = 0 OR t.id = ?1)
+             WHERE (?1 IS NULL OR t.id = ?1)
                AND (?2 = 0 OR t.id NOT IN (SELECT title_id FROM title_meta))
              ORDER BY t.name",
         )?;
         let rows = stmt
-            .query_map(params![only.unwrap_or(0), i64::from(skip_fetched)], |r| {
+            .query_map(params![only, i64::from(skip_fetched)], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    /// Upsert merged editorial metadata for a title.
+    /// Persist a title's merged metadata and (optionally) replace its screenshots
+    /// in a single transaction, so the two halves of one enrichment record can't
+    /// be left inconsistent. `shots = None` leaves the existing screenshots
+    /// untouched (the caller uses this when a re-enrich downloaded none, so a
+    /// transient image-fetch failure doesn't wipe good screenshots); `Some(&[])`
+    /// clears them.
     #[allow(clippy::too_many_arguments)]
-    pub fn save_meta(
+    pub fn save_enrichment(
         &self,
         title_id: i64,
         genre: Option<&str>,
@@ -741,8 +751,10 @@ impl Db {
         external_url: Option<&str>,
         match_score: Option<f64>,
         fetched_at: i64,
+        shots: Option<&[StoredShot]>,
     ) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO title_meta
                  (title_id, genre, description, year, sources, external_url, match_score, fetched_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
@@ -752,27 +764,18 @@ impl Db {
                  match_score=excluded.match_score, fetched_at=excluded.fetched_at",
             params![title_id, genre, description, year, sources, external_url, match_score, fetched_at],
         )?;
-        Ok(())
-    }
-
-    /// Replace a title's screenshots with `shots` (`(blob_sha1, mime, caption,
-    /// source, ord)`), so a re-enrich doesn't accumulate duplicates.
-    pub fn replace_screenshots(
-        &self,
-        title_id: i64,
-        shots: &[(String, String, Option<String>, String, i64)],
-    ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM title_screenshot WHERE title_id = ?1",
-            [title_id],
-        )?;
-        for (sha1, mime, caption, source, ord) in shots {
+        if let Some(shots) = shots {
             tx.execute(
-                "INSERT INTO title_screenshot (title_id, blob_sha1, mime, caption, source, ord)
-                 VALUES (?1,?2,?3,?4,?5,?6)",
-                params![title_id, sha1, mime, caption, source, ord],
+                "DELETE FROM title_screenshot WHERE title_id = ?1",
+                [title_id],
             )?;
+            for (sha1, mime, caption, source, ord) in shots {
+                tx.execute(
+                    "INSERT INTO title_screenshot (title_id, blob_sha1, mime, caption, source, ord)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![title_id, sha1, mime, caption, source, ord],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -937,5 +940,62 @@ mod tests {
         let e1 = db.upsert_edition(title_id, &k1).unwrap();
         let e2 = db.upsert_edition(title_id, &k2).unwrap();
         assert_ne!(e1, e2);
+    }
+
+    #[test]
+    fn enrichment_roundtrip_sentinel_and_no_wipe() {
+        let db = Db::open_memory().unwrap();
+        let tid = db.upsert_title("A-10 Tank Killer", "game").unwrap();
+
+        // `only = Some(0)` is a real (absent) id, NOT a match-everything wildcard.
+        assert!(db.titles_for_enrich(Some(0), false).unwrap().is_empty());
+        assert_eq!(db.titles_for_enrich(None, false).unwrap().len(), 1);
+        assert_eq!(db.titles_for_enrich(Some(tid), false).unwrap().len(), 1);
+
+        let shots: Vec<StoredShot> = vec![
+            ("aa".into(), "image/png".into(), None, "openretro".into(), 0),
+            ("bb".into(), "image/png".into(), None, "openretro".into(), 1),
+        ];
+        db.save_enrichment(
+            tid,
+            Some("flight"),
+            Some("desc"),
+            Some(1990),
+            Some("openretro"),
+            Some("url"),
+            Some(0.9),
+            1,
+            Some(&shots),
+        )
+        .unwrap();
+        let m = db.title_meta(tid).unwrap().unwrap();
+        assert_eq!(m.genre.as_deref(), Some("flight"));
+        assert_eq!(m.screenshots.len(), 2);
+
+        // Re-enrich with `None` keeps existing screenshots (transient fetch fail),
+        // while metadata still updates — the two are one atomic write.
+        db.save_enrichment(tid, Some("shooter"), None, None, None, None, None, 2, None)
+            .unwrap();
+        let m = db.title_meta(tid).unwrap().unwrap();
+        assert_eq!(m.genre.as_deref(), Some("shooter"), "meta updated");
+        assert_eq!(m.screenshots.len(), 2, "screenshots preserved on None");
+
+        // `Some(&[])` explicitly clears them.
+        db.save_enrichment(
+            tid,
+            Some("shooter"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            3,
+            Some(&[]),
+        )
+        .unwrap();
+        assert_eq!(db.title_meta(tid).unwrap().unwrap().screenshots.len(), 0);
+
+        // Now enriched, skip_fetched excludes it.
+        assert!(db.titles_for_enrich(None, true).unwrap().is_empty());
     }
 }

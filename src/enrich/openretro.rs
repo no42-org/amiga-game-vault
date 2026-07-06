@@ -111,8 +111,7 @@ fn best_match_slug(html: &str, name: &str) -> Option<String> {
 /// Parse an OpenRetro game page into a [`ProviderResult`], scoring the page's own
 /// title against the query. Returns `None` if the page title is too weak a match.
 fn parse_game_page(html: &str, base: &str, query_name: &str, url: &str) -> Option<ProviderResult> {
-    use scraper::{Html, Selector};
-    let doc = Html::parse_document(html);
+    let doc = scraper::Html::parse_document(html);
 
     let page_title = extract_page_title(&doc);
     let score = super::similarity(query_name, &page_title);
@@ -120,29 +119,7 @@ fn parse_game_page(html: &str, base: &str, query_name: &str, url: &str) -> Optio
         return None;
     }
 
-    // Genre tags: single-segment `/browse/{tag}` links, excluding the platform
-    // index (`/browse/amiga/...`).
-    let mut genres: Vec<String> = Vec::new();
-    if let Ok(sel) = Selector::parse(r#"a[href^="/browse/"]"#) {
-        for el in doc.select(&sel) {
-            let href = el.value().attr("href").unwrap_or("");
-            let rest = href.trim_start_matches("/browse/").trim_matches('/');
-            if rest.is_empty() || rest.contains('/') || rest == "amiga" {
-                continue;
-            }
-            let text = el.text().collect::<String>().trim().to_string();
-            let g = if text.is_empty() {
-                rest.replace('-', " ")
-            } else {
-                text
-            };
-            if !genres.iter().any(|x| x.eq_ignore_ascii_case(&g)) {
-                genres.push(g);
-            }
-        }
-    }
-    let genre = (!genres.is_empty()).then(|| genres.join(", "));
-
+    let genre = extract_genre(&doc);
     let description = extract_description(&doc);
     let shots = extract_shots(&doc, base);
 
@@ -215,21 +192,55 @@ fn extract_description(doc: &scraper::Html) -> Option<String> {
     None
 }
 
-/// Screenshot image URLs: `/image/{hash}` sources, excluding cover art
-/// (`t=lbcover`). Dedup by hash; return full-size originals.
+/// Genre: the tags from OpenRetro's `Tags:` info row only. Scoping to that row is
+/// deliberate — collecting every `/browse/` link would also pull in publisher,
+/// developer and year facets (e.g. `/browse/1990`) and write them into the genre.
+fn extract_genre(doc: &scraper::Html) -> Option<String> {
+    use scraper::Selector;
+    let row_sel = Selector::parse(".game-info-row").ok()?;
+    let a_sel = Selector::parse(r#"a[href^="/browse/"]"#).ok()?;
+    for row in doc.select(&row_sel) {
+        let label = row.text().collect::<String>();
+        if !label.trim_start().to_ascii_lowercase().starts_with("tags") {
+            continue;
+        }
+        let mut genres: Vec<String> = Vec::new();
+        for a in row.select(&a_sel) {
+            let text = a.text().collect::<String>().trim().to_string();
+            let g = if text.is_empty() {
+                let href = a.value().attr("href").unwrap_or("");
+                href.trim_start_matches("/browse/").replace('-', " ")
+            } else {
+                text
+            };
+            if !g.is_empty() && !genres.iter().any(|x| x.eq_ignore_ascii_case(&g)) {
+                genres.push(g);
+            }
+        }
+        if !genres.is_empty() {
+            return Some(genres.join(", "));
+        }
+    }
+    None
+}
+
+/// Screenshot image URLs from the page's lightbox links. Screenshots are wrapped
+/// in `<a href="/image/{hash}?s=2x">`; cover art uses a different size param
+/// (`?s=512`), so keying on `s=2x` excludes covers, avatars, logos and related-
+/// game thumbnails. Dedup by hash; download the full-size original.
 fn extract_shots(doc: &scraper::Html, base: &str) -> Vec<Shot> {
     use scraper::Selector;
-    let Ok(img) = Selector::parse(r#"img[src*="/image/"]"#) else {
+    let Ok(a) = Selector::parse(r#"a[href*="/image/"]"#) else {
         return Vec::new();
     };
     let mut shots = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for el in doc.select(&img) {
-        let src = el.value().attr("src").unwrap_or("");
-        if src.contains("lbcover") {
-            continue; // box/cover art, not a screenshot
+    for el in doc.select(&a) {
+        let href = el.value().attr("href").unwrap_or("");
+        if !href.contains("s=2x") {
+            continue; // not a screenshot enlarge link (covers use s=512, etc.)
         }
-        let Some(rest) = src.split("/image/").nth(1) else {
+        let Some(rest) = href.split("/image/").nth(1) else {
             continue;
         };
         let hash = rest.split(['?', '/']).next().unwrap_or("");
@@ -238,11 +249,7 @@ fn extract_shots(doc: &scraper::Html, base: &str) -> Vec<Shot> {
         }
         shots.push(Shot {
             url: format!("{base}/image/{hash}"),
-            caption: el
-                .value()
-                .attr("alt")
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty()),
+            caption: None,
             source: SOURCE.to_string(),
         });
     }
@@ -262,34 +269,44 @@ mod tests {
 
     #[test]
     fn parses_a_representative_game_page() {
-        // A trimmed page mirroring OpenRetro's structure: h1 title, /browse genre
-        // tags, the `.game-about` blurb, cover + screenshots under /image/, and a
-        // footer paragraph the description extractor must NOT pick up.
+        // A trimmed page mirroring OpenRetro's real structure: a `Tags:` info row
+        // (genres), a decoy `Publisher:` row that is ALSO a /browse/ link, the
+        // `.game-about` blurb, a cover (lightbox `s=512`) + screenshots (lightbox
+        // `s=2x`), and a footer paragraph the description must NOT pick up.
         let html = r##"<!doctype html><html><head>
             <title>A-10 Tank Killer Amiga | OpenRetro Game Database</title>
             </head><body>
             <h1>A-10 Tank Killer</h1>
-            <div>Tags: <a href="/browse/flight">flight</a>, <a href="/browse/simulation">simulation</a>,
-                 <a href="/browse/war">war</a></div>
+            <div class="game-info-row"><span>Publisher:</span><a href="/browse/dynamix">Dynamix</a></div>
+            <div class="game-info-row"><span>Tags:</span><a href="/browse/flight">flight</a>,
+                 <a href="/browse/simulation">simulation</a>, <a href="/browse/war">war</a></div>
             <a href="/browse/amiga/a">back to A</a>
-            <img src="/image/cover0001?w=140&h=186&t=lbcover" alt="Cover for A-10 Tank Killer">
             <div class="game-about"><p>This simulation puts you in the cockpit of the
                  A-10 Thunderbolt II, also known as the "Warthog".</p></div>
-            <a href="/image/shot0001?s=2x"><img src="/image/shot0001?w=332&h=208" alt="screen 1"></a>
-            <a href="/image/shot0002?s=2x"><img src="/image/shot0002?w=332&h=208" alt="screen 2"></a>
+            <a href="/image/cover0001?s=512&f=jpg"><img src="/image/cover0001?w=200&h=266&t=lbcover" alt="front image"></a>
+            <a href="/image/shot0001?s=2x"><img src="/image/shot0001?w=332&h=208" alt=""></a>
+            <a href="/image/shot0002?s=2x"><img src="/image/shot0002?w=332&h=208" alt=""></a>
             <p>Page generated in 0.05 seconds. All times are in UTC. By submitting information you
                disclaim copyright to your work related to preparing this database entry footer.</p>
             </body></html>"##;
         let r = parse_game_page(html, "https://openretro.org", "A-10 Tank Killer", "u")
             .expect("parsed");
-        assert_eq!(r.genre.as_deref(), Some("flight, simulation, war"));
+        assert_eq!(
+            r.genre.as_deref(),
+            Some("flight, simulation, war"),
+            "only the Tags row, not the Publisher /browse/ link"
+        );
         let desc = r.description.as_ref().unwrap();
         assert!(desc.contains("Warthog"), "took the game blurb");
         assert!(
             !desc.contains("Page generated"),
             "not the footer boilerplate"
         );
-        assert_eq!(r.shots.len(), 2, "cover excluded, two screenshots kept");
+        assert_eq!(
+            r.shots.len(),
+            2,
+            "cover (s=512) excluded, two screenshots (s=2x) kept"
+        );
         assert_eq!(r.shots[0].url, "https://openretro.org/image/shot0001");
         assert!(r.score > 0.9);
     }

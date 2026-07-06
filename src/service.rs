@@ -863,8 +863,13 @@ impl Vault {
     }
 
     /// Persist a merged enrichment record: store each screenshot's bytes in the
-    /// content-addressed blob store, then write the metadata and screenshot rows.
-    /// `images` are `(bytes, mime, caption, source, ord)`.
+    /// content-addressed blob store, then write metadata and screenshots in one
+    /// transaction. `images` are `(bytes, mime, caption, source, ord)`.
+    ///
+    /// If the merge expected screenshots but every download failed (a transient
+    /// image-CDN error), the existing screenshots are kept rather than wiped —
+    /// only a run that actually produced images (or one that legitimately found
+    /// none) replaces them.
     pub fn save_enrichment(
         &self,
         title_id: i64,
@@ -882,7 +887,14 @@ impl Vault {
                 *ord,
             ));
         }
-        self.db.save_meta(
+        // Replace screenshots when we downloaded some, or when the merge found no
+        // screenshots at all; otherwise (expected some, got none) leave them be.
+        let shots_arg = if !shots.is_empty() || merged.shots.is_empty() {
+            Some(shots.as_slice())
+        } else {
+            None
+        };
+        self.db.save_enrichment(
             title_id,
             merged.genre.as_deref(),
             merged.description.as_deref(),
@@ -891,8 +903,8 @@ impl Vault {
             merged.external_url.as_deref(),
             Some(f64::from(merged.score)),
             crate::enrich::now_secs(),
+            shots_arg,
         )?;
-        self.db.replace_screenshots(title_id, &shots)?;
         Ok(())
     }
 
