@@ -65,6 +65,12 @@ pub struct SetView {
     pub complete_lineages: usize,
     pub primary_lineage: Option<String>,
     pub variant_count: i64,
+    /// Count of this release's lineages that fold to each browse type class (by
+    /// lineage: the no-group lineage is `original`, each crack lineage is
+    /// `cracked` or `hacked`). Drives the colour-coded summary chips.
+    pub original_count: usize,
+    pub cracked_count: usize,
+    pub hacked_count: usize,
 }
 
 /// A Work: everything sharing a title name (the game release(s) and demos),
@@ -76,6 +82,11 @@ pub struct WorkView {
     pub game_count: usize,
     pub demo_count: usize,
     pub tool_count: usize,
+    /// Work-level totals of each browse type class, summed across releases, so the
+    /// card header can show summary chips without re-summing on the client.
+    pub original_count: usize,
+    pub cracked_count: usize,
+    pub hacked_count: usize,
     pub releases: Vec<SetView>,
 }
 
@@ -95,6 +106,13 @@ pub struct PlayableSet {
     pub rep_edition_id: i64,
     /// The crack/hack group, or `None` for the original.
     pub lineage: Option<String>,
+    /// Browse type class of this lineage: `original` (no group), else `cracked`
+    /// or `hacked` (if any member is a hack/modification/trainer).
+    pub kind: String,
+    /// Trainer text (e.g. "+3 DC") if any member of this lineage carries one, so
+    /// the UI can show a trainer chip even when there is no plain/trained *choice*
+    /// (which is all `trainer_options` captures). `None` if the lineage is untrained.
+    pub trainer: Option<String>,
     pub complete: bool,
     pub missing_disks: Vec<u32>,
     pub is_recommended: bool,
@@ -125,6 +143,22 @@ pub struct ResolveMeta {
     pub publisher: Option<String>,
     pub disk_no: Option<u32>,
     pub disk_count: Option<u32>,
+}
+
+/// The browse display class of one lineage of a set: the 5→3 fold
+/// ([`crate::edition::DumpType::class3`]) of the lineage's best-ranked member —
+/// i.e. the dump the set actually downloads (`rank_key` prefers the cleanest,
+/// verified/original, trainer-free variant). So a bucket that holds only a
+/// hack/trainer reads as `hacked`, while one that also holds a clean dump reads
+/// as `original`; the no-group (`""`) lineage is not special-cased. Empty (all
+/// members disqualified) falls back to `original`.
+fn lineage_class(tag: &str, members: &[DiskMember]) -> &'static str {
+    members
+        .iter()
+        .filter(|m| m.lineage.as_deref().unwrap_or("") == tag && !m.info.disqualified())
+        .min_by(|a, b| rank_key(&a.info).cmp(&rank_key(&b.info)))
+        .map(|m| m.info.dump_type.class3())
+        .unwrap_or("original")
 }
 
 pub struct Vault {
@@ -451,7 +485,10 @@ impl Vault {
             // title whose only variants are disqualified reports 0, like the
             // multi-disk case). NOTE: this issues per-set reads on browse — cheap at
             // the current scale; a batched aggregate is a documented follow-up.
-            let covs = self.set_lineages(rep.edition_id)?;
+            // Gather once, then derive both coverage and the type-class counts from
+            // the same members (no extra read for the summary chips).
+            let (dc, members) = self.gather_set(rep.edition_id)?;
+            let covs = lineage_coverage(&members, dc);
             let complete_lineages = covs.iter().filter(|c| c.complete).count();
             let primary_lineage = covs
                 .iter()
@@ -459,6 +496,21 @@ impl Vault {
                 .and_then(|c| c.lineage.clone());
             if incomplete_only && complete_lineages > 0 {
                 continue;
+            }
+            let mut tags: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for m in &members {
+                if !m.info.disqualified() {
+                    tags.insert(m.lineage.clone().unwrap_or_default());
+                }
+            }
+            let (mut original_count, mut cracked_count, mut hacked_count) =
+                (0usize, 0usize, 0usize);
+            for tag in &tags {
+                match lineage_class(tag, &members) {
+                    "original" => original_count += 1,
+                    "cracked" => cracked_count += 1,
+                    _ => hacked_count += 1,
+                }
             }
             sets.push(SetView {
                 rep_edition_id: rep.edition_id,
@@ -476,6 +528,9 @@ impl Vault {
                 complete_lineages,
                 primary_lineage,
                 variant_count,
+                original_count,
+                cracked_count,
+                hacked_count,
             });
         }
         sets.sort_by(|a, b| {
@@ -590,11 +645,15 @@ impl Vault {
             .into_iter()
             .map(|(name, releases)| {
                 let count = |c: &str| releases.iter().filter(|r| r.category == c).count();
+                let sum = |f: fn(&SetView) -> usize| releases.iter().map(f).sum();
                 WorkView {
                     release_count: releases.len(),
                     game_count: count("game"),
                     demo_count: count("demo"),
                     tool_count: count("tool"),
+                    original_count: sum(|r| r.original_count),
+                    cracked_count: sum(|r| r.cracked_count),
+                    hacked_count: sum(|r| r.hacked_count),
                     name,
                     releases,
                 }
@@ -624,9 +683,17 @@ impl Vault {
                 Vec::new()
             };
             let trainer_options = self.trainer_options(&members, &tag, &disks);
+            let kind = lineage_class(&tag, &members).to_string();
+            // Any trainer present in this lineage (not just when there's a choice).
+            let trainer = members
+                .iter()
+                .filter(|m| m.lineage.as_deref().unwrap_or("") == tag && !m.info.disqualified())
+                .find_map(|m| m.info.trainer.clone());
             out.push(PlayableSet {
                 rep_edition_id: edition_id,
                 lineage: c.lineage,
+                kind,
+                trainer,
                 complete: c.complete,
                 missing_disks,
                 is_recommended: c.is_primary,
