@@ -150,6 +150,9 @@ docker run --rm -v amiga-game-vault_vault-data:/from -v amiga-disk-vault_vault-d
   fuzzy inner-file matcher is a planned addition and unaffected by its absence.
 - The **UID** in each filename is `sha1[:10]` — portable and self-verifying, so
   the collection can be re-indexed from the files alone if the database is lost.
+- **Prebuilt images** (multi-arch, `linux/amd64` + `linux/arm64`) are published to
+  `ghcr.io/no42-org/amiga-disk-vault` on each release (`v*` tag). `make oci` builds
+  a local host-architecture image for development.
 - **Enrichment** (description, genre, screenshots) is pulled from online Amiga
   libraries and attached to a title. It is manual — use the **Enrich** action on a
   work, or **Enrich all** — and fetched in the background, never during upload.
