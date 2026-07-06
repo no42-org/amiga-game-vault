@@ -486,7 +486,8 @@ function renderReleaseRow(r) {
   if (r.language) bits.push(r.language);
   const meta = bits.length ? ' · ' + bits.join(' · ') : '';
   if (r.category === 'game') {
-    const disks = (r.disk_count && r.disk_count > 1) ? `${r.disks_present.length}/${r.disk_count} disks` : 'disk';
+    const total = r.disk_count || r.disks_present.length;
+    const disks = total > 1 ? `${r.disks_present.length}/${total} disks` : 'disk';
     return `<div class="variant">
         <span style="cursor:pointer" onclick="togglePlayable(${r.rep_edition_id})"><b>game</b>${meta} · ${disks} ▸</span>
         <span class="meta">${r.complete_lineages} playable set(s)</span></div>
