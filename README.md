@@ -1,4 +1,4 @@
-# Amiga Game Vault
+# Amiga Disk Vault
 
 A self-hosted ROM manager for Amiga **ADF** disk images. It ingests uploads,
 identifies them against reference DATs (or by TOSEC filename), **deduplicates**
@@ -28,8 +28,8 @@ is OCI-compliant and also builds with Podman/Buildah.
 **1. Get the files**
 
 ```bash
-git clone https://github.com/no42-org/amiga-game-vault.git
-cd amiga-game-vault
+git clone https://github.com/no42-org/amiga-disk-vault.git
+cd amiga-disk-vault
 ```
 
 **2. Build and start**
@@ -97,8 +97,12 @@ ports:
 (`blobs/` holds immutable image bytes; `vault.sqlite` holds the catalog). Back it
 up by copying the volume, e.g.:
 
+> Upgrading from an older checkout named `amiga-game-vault`? Your data was in the
+> `amiga-game-vault_vault-data` volume. Migrate it once with
+> `docker volume create amiga-disk-vault_vault-data && docker run --rm -v amiga-game-vault_vault-data:/from -v amiga-disk-vault_vault-data:/to alpine sh -c 'cp -a /from/. /to/'`.
+
 ```bash
-docker run --rm -v amiga-game-vault_vault-data:/data -v "$PWD":/backup \
+docker run --rm -v amiga-disk-vault_vault-data:/data -v "$PWD":/backup \
   debian:bookworm-slim tar czf /backup/vault-backup.tar.gz -C /data .
 ```
 
@@ -134,9 +138,9 @@ docker run --rm -v amiga-game-vault_vault-data:/data -v "$PWD":/backup \
 Requires a Rust toolchain and a C compiler (for the bundled SQLite).
 
 ```bash
-make build            # release binary at target/release/amiga-game-vault
+make build            # release binary at target/release/amiga-disk-vault
 make verify           # build + full test suite
-VAULT_ADDR=127.0.0.1:4500 VAULT_DATA=./data ./target/release/amiga-game-vault
+VAULT_ADDR=127.0.0.1:4500 VAULT_DATA=./data ./target/release/amiga-disk-vault
 ```
 
 ## License

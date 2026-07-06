@@ -1,11 +1,15 @@
 # Copyright 2026 Ronny Trommer <ronny@no42.org>
 # SPDX-License-Identifier: MIT
 
+# Pin the Compose project name so the data volume (amiga-disk-vault_vault-data)
+# is stable regardless of the directory this file is run from.
+name: amiga-disk-vault
+
 services:
   vault:
     build: .
-    image: amiga-game-vault:latest
-    container_name: amiga-game-vault
+    image: amiga-disk-vault:latest
+    container_name: amiga-disk-vault
     # Default port 4500 ("A500" in leet). The app has NO authentication and this
     # binds to all interfaces for LAN use. Override the host port to avoid a clash:
     # VAULT_HOST_PORT=4501 docker compose up -d. For host-local only, front it with

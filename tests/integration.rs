@@ -7,7 +7,7 @@
 //! trainer variants collapsing into one Edition, and Monkey Island 2 splitting
 //! into three language Editions.
 
-use amiga_game_vault::service::{IngestOutcome, Vault};
+use amiga_disk_vault::service::{IngestOutcome, Vault};
 
 /// Distinct ADF bytes per variant, so each is a separate artifact.
 fn adf_for(name: &str) -> Vec<u8> {
@@ -161,7 +161,7 @@ fn exact_duplicate_is_collapsed() {
 
 #[test]
 fn unidentifiable_upload_is_quarantined_then_resolvable() {
-    use amiga_game_vault::service::ResolveMeta;
+    use amiga_disk_vault::service::ResolveMeta;
 
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open_memory(dir.path()).unwrap();

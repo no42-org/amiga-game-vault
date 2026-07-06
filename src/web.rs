@@ -381,7 +381,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Amiga Game Vault</title>
+<title>Amiga Disk Vault</title>
 <style>
   :root { color-scheme: dark; }
   body { font: 14px/1.5 system-ui, sans-serif; margin: 0; background: #14161a; color: #e6e8ec; }
@@ -432,8 +432,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
 </head>
 <body>
 <header>
-  <img src="/logo.png" alt="Amiga Game Vault logo" class="logo">
-  <h1>Amiga Game Vault</h1>
+  <img src="/logo.png" alt="Amiga Disk Vault logo" class="logo">
+  <h1>Amiga Disk Vault</h1>
 </header>
 <main>
   <div class="controls">

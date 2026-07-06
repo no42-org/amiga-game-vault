@@ -31,11 +31,11 @@ jobs:
 
       - name: Package
         run: |
-          tar -czf "amiga-game-vault-${{ github.ref_name }}-${{ matrix.target_name }}.tar.gz" \
-            -C target/release amiga-game-vault
+          tar -czf "amiga-disk-vault-${{ github.ref_name }}-${{ matrix.target_name }}.tar.gz" \
+            -C target/release amiga-disk-vault
 
       - name: Publish release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
-          files: amiga-game-vault-*.tar.gz
+          files: amiga-disk-vault-*.tar.gz
           generate_release_notes: true
