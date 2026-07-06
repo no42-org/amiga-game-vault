@@ -131,6 +131,10 @@ docker run --rm -v amiga-game-vault_vault-data:/from -v amiga-disk-vault_vault-d
 | `GET  /api/editions?q=&category=&language=&status=` | List/search Editions.       |
 | `GET  /api/editions/{id}/variants`     | Variants of an Edition.                  |
 | `GET  /api/artifact/{uid}`             | Full metadata for a UID.                 |
+| `POST /api/titles/{id}/enrich`         | Enrich one title from online libraries.  |
+| `POST /api/enrich`                     | Bulk-enrich all un-enriched titles.      |
+| `GET  /api/titles/{id}/meta`           | Online metadata + screenshots for a title.|
+| `GET  /media/{sha1}`                   | A stored screenshot's bytes.             |
 | `GET  /download/{uid}`                 | Download an artifact (canonical name).   |
 | `GET  /export/edition/{id}`            | Download an Edition as a zip.            |
 | `GET  /api/quarantine`                 | List unidentified uploads.               |
@@ -145,6 +149,11 @@ docker run --rm -v amiga-game-vault_vault-data:/from -v amiga-disk-vault_vault-d
   fuzzy inner-file matcher is a planned addition and unaffected by its absence.
 - The **UID** in each filename is `sha1[:10]` — portable and self-verifying, so
   the collection can be re-indexed from the files alone if the database is lost.
+- **Enrichment** (description, genre, screenshots) is pulled from online Amiga
+  libraries and attached to a title. It is manual — use the **Enrich** action on a
+  work, or **Enrich all** — and fetched in the background, never during upload.
+  Screenshots are stored locally in the blob store and served from `/media`. The
+  current source is [OpenRetro](https://openretro.org) (Amiga-native, no key).
 
 ## Build from source (without Docker)
 
