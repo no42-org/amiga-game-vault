@@ -549,8 +549,12 @@ impl Vault {
                 .then(a.qualifier.cmp(&b.qualifier))
                 .then(a.disk_count.cmp(&b.disk_count))
         });
-        // Attach enrichment, reading only the shown titles' rows (not the whole table).
-        let ids: Vec<i64> = sets.iter().map(|s| s.title_id).collect();
+        // Attach enrichment, reading only the shown titles' rows (not the whole
+        // table). One title_id can back several sets (versions/categories), so
+        // dedup the lookup ids but keep `.cloned()` — every set needs its copy.
+        let mut ids: Vec<i64> = sets.iter().map(|s| s.title_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
         let meta_by_title = self.db.title_meta_for(&ids)?;
         for s in &mut sets {
             s.meta = meta_by_title.get(&s.title_id).cloned();

@@ -781,13 +781,21 @@ impl Db {
         Ok(())
     }
 
+    /// Column list read by [`Self::map_meta`] (shared by the single and batch reads).
+    const TITLE_META_COLS: &'static str =
+        "title_id, genre, description, year, sources, external_url";
+    /// Column list read by [`Self::map_shot`] (shared by the single and batch reads).
+    const SCREENSHOT_COLS: &'static str = "title_id, blob_sha1, mime, caption, source";
+
     /// Merged metadata (with screenshots) for a single title, if enriched.
     pub fn title_meta(&self, title_id: i64) -> Result<Option<TitleMeta>> {
         let mut meta = self
             .conn
             .query_row(
-                "SELECT title_id, genre, description, year, sources, external_url
-                 FROM title_meta WHERE title_id = ?1",
+                &format!(
+                    "SELECT {} FROM title_meta WHERE title_id = ?1",
+                    Self::TITLE_META_COLS
+                ),
                 [title_id],
                 Self::map_meta,
             )
@@ -799,29 +807,30 @@ impl Db {
     }
 
     /// Metadata (with screenshots) for the given titles, keyed by title_id — a
-    /// batch load for the browse listing that reads only the rows it needs. `ids`
-    /// are i64s already sourced from the database, so inlining them into the `IN`
-    /// list is injection-safe.
+    /// batch load for the browse listing that reads only the rows it needs.
     pub fn title_meta_for(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, TitleMeta>> {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let placeholders = vec!["?"; ids.len()].join(",");
         let mut by_title: std::collections::HashMap<i64, TitleMeta> = self
             .conn
             .prepare(&format!(
-                "SELECT title_id, genre, description, year, sources, external_url
-                 FROM title_meta WHERE title_id IN ({list})"
+                "SELECT {} FROM title_meta WHERE title_id IN ({placeholders})",
+                Self::TITLE_META_COLS
             ))?
-            .query_map([], Self::map_meta)?
+            .query_map(rusqlite::params_from_iter(ids), Self::map_meta)?
             .filter_map(std::result::Result::ok)
             .map(|m| (m.title_id, m))
             .collect();
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT title_id, blob_sha1, mime, caption, source FROM title_screenshot
-             WHERE title_id IN ({list}) ORDER BY title_id, ord, id"
+            "SELECT {} FROM title_screenshot WHERE title_id IN ({placeholders})
+             ORDER BY title_id, ord, id",
+            Self::SCREENSHOT_COLS
         ))?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, Self::map_shot(r)?)))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids), |r| {
+            Ok((r.get::<_, i64>(0)?, Self::map_shot(r)?))
+        })?;
         for row in rows {
             let (tid, shot) = row?;
             if let Some(m) = by_title.get_mut(&tid) {
@@ -833,10 +842,10 @@ impl Db {
 
     /// A title's screenshots, ordered.
     pub fn screenshots(&self, title_id: i64) -> Result<Vec<Screenshot>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT title_id, blob_sha1, mime, caption, source FROM title_screenshot
-             WHERE title_id = ?1 ORDER BY ord, id",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM title_screenshot WHERE title_id = ?1 ORDER BY ord, id",
+            Self::SCREENSHOT_COLS
+        ))?;
         let rows = stmt
             .query_map([title_id], Self::map_shot)?
             .collect::<std::result::Result<Vec<_>, _>>()?;

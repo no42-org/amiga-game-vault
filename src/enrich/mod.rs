@@ -211,8 +211,11 @@ pub async fn run(
             report.skipped += 1;
             continue;
         };
-        // Download screenshot bytes concurrently (independent URLs, lock-free).
-        // Bounded by MAX_SHOTS, so this is a small fan-out, not a flood.
+        // Download this title's screenshots concurrently (independent URLs,
+        // lock-free), bounded by MAX_SHOTS. Each carries its own `ord`, persisted
+        // per row and honoured by every read, so collection order is irrelevant.
+        // (Titles themselves are processed sequentially; title-level concurrency
+        // is a deferred next step if bulk enrich needs to scale.)
         let mut set = tokio::task::JoinSet::new();
         for (i, shot) in merged.shots.iter().take(MAX_SHOTS).enumerate() {
             let http = http.clone();
@@ -228,14 +231,7 @@ pub async fn run(
                 }
             });
         }
-        let mut images: Vec<ScreenshotBytes> = Vec::new();
-        while let Some(res) = set.join_next().await {
-            if let Ok(Some(img)) = res {
-                images.push(img);
-            }
-        }
-        // Completion order is nondeterministic; restore the merge order via `ord`.
-        images.sort_by_key(|img| img.4);
+        let images: Vec<ScreenshotBytes> = set.join_all().await.into_iter().flatten().collect();
         {
             let v = state.lock().expect("vault mutex poisoned");
             v.save_enrichment(q.title_id, &merged, &images)?;
