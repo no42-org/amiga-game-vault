@@ -60,6 +60,12 @@ impl BlobStore {
     pub fn get(&self, sha1: &str) -> Result<Vec<u8>> {
         Ok(fs::read(self.path_for(sha1))?)
     }
+
+    /// The byte size of a stored blob, from a filesystem stat — without reading
+    /// its contents into memory.
+    pub fn byte_len(&self, sha1: &str) -> Result<u64> {
+        Ok(fs::metadata(self.path_for(sha1))?.len())
+    }
 }
 
 #[cfg(test)]

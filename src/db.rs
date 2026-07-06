@@ -80,6 +80,12 @@ pub struct ArtifactView {
     pub is_primary: bool,
     pub tosec_name: Option<String>,
     pub blob_sha1: String,
+    pub crc32: String,
+    pub md5: String,
+    pub alt_index: u32,
+    /// Blob size in bytes; a computed (non-column) field filled by the service
+    /// layer from the blob store, like `is_primary`. `None` when unavailable.
+    pub byte_len: Option<u64>,
     pub version: Option<String>,
     pub language: Option<String>,
     pub disk_no: Option<u32>,
@@ -463,6 +469,10 @@ impl Db {
             language: r.get(10)?,
             disk_no: r.get(11)?,
             disk_count: r.get(12)?,
+            crc32: r.get(13)?,
+            md5: r.get(14)?,
+            alt_index: r.get(15)?,
+            byte_len: None,
         };
         v.canonical_name = v.canonical();
         Ok(v)
@@ -470,7 +480,8 @@ impl Db {
 
     const ARTIFACT_COLS: &'static str =
         "a.uid, a.display_title, a.dump_type, a.crack_group, a.trainer, a.year, a.verified,
-         a.tosec_name, a.blob_sha1, e.version, e.language, e.disk_no, e.disk_count";
+         a.tosec_name, a.blob_sha1, e.version, e.language, e.disk_no, e.disk_count,
+         a.crc32, a.md5, a.alt_index";
 
     pub fn get_artifact(&self, uid: &str) -> Result<Option<ArtifactView>> {
         let sql = format!(

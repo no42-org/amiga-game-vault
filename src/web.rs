@@ -400,6 +400,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .variants.open { display: block; }
   .variant { padding: 4px 0; border-top: 1px solid #23262d; display: flex; justify-content: space-between; }
   .primary { color: #7ee081; }
+  .variant.vcol { display: block; }
+  .vrow { display: flex; justify-content: space-between; gap: 12px; }
+  .vsub { padding-left: 2px; margin-top: 2px; }
   .vnode { padding: 6px 0 2px; border-top: 1px solid #23262d; }
   .vnode .vyear { color: #9aa0aa; font-size: 12px; }
   .variant.lang { padding-left: 16px; }
@@ -600,12 +603,24 @@ async function toggleDisks(rep) {
     <div class="variants" id="dv${d.edition_id}"></div>`).join('');
   box.dataset.loaded = '1';
 }
+// alt_index → TOSEC-style badge: 0 = base dump, 1 = [a], n = [a{n}].
+function altBadge(i) { return i === 0 ? 'base' : i === 1 ? '[a]' : `[a${i}]`; }
 async function renderVariants(id) {
   const { variants } = await (await fetch(`/api/editions/${id}/variants`)).json();
-  return variants.map(v => `<div class="variant">
-      <span class="${v.is_primary ? 'primary' : ''}">${v.is_primary ? '★ ' : ''}<code>${esc(v.canonical_name)}</code></span>
-      <span class="meta">${v.dump_type || '?'}${v.crack_group ? ' · ' + esc(v.crack_group) : ''}${v.verified ? ' · verified' : ''}
-        · <a href="/download/${v.uid}">download</a></span></div>`).join('');
+  return variants.map(v => {
+    const head = [v.dump_type || '?'];
+    if (v.crack_group) head.push(esc(v.crack_group));
+    head.push(altBadge(v.alt_index));
+    if (v.verified) head.push('verified');
+    const fp = [`crc ${v.crc32}`, `md5 ${(v.md5 || '').slice(0, 8)}…`];
+    if (v.byte_len != null) fp.push(`${v.byte_len.toLocaleString()} B`);
+    return `<div class="variant vcol">
+      <div class="vrow"><span class="${v.is_primary ? 'primary' : ''}">${v.is_primary ? '★ ' : ''}<code>${esc(v.canonical_name)}</code></span>
+        <span class="meta">${head.join(' · ')}</span></div>
+      ${v.tosec_name ? `<div class="meta vsub"><code>${esc(v.tosec_name)}</code></div>` : ''}
+      <div class="meta vsub">${fp.join(' · ')} · <a href="/download/${v.uid}">download</a></div>
+    </div>`;
+  }).join('');
 }
 async function expandDisk(ed) {
   const box = document.getElementById('dv' + ed);

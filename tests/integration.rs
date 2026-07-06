@@ -117,6 +117,32 @@ fn mi2_splits_into_three_language_editions() {
 }
 
 #[test]
+fn variant_read_exposes_provenance_and_size() {
+    // The inspect view needs each variant's provenance (original TOSEC name +
+    // alt-index) and a fingerprint (crc32/md5/byte size) to tell apart dumps
+    // that share one canonical name.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    let name = "A-10 Tank Killer v1.0 (1990)(Dynamix)(Disk 1 of 2)[a2 highscore].adf";
+    ingest(&vault, name);
+
+    let ed = vault.browse(Some("A-10"), None, None, None).unwrap();
+    let variants = vault.variants(ed[0].edition_id).unwrap();
+    assert_eq!(variants.len(), 1);
+    let v = &variants[0];
+
+    assert_eq!(v.crc32.len(), 8, "crc32 is 8 hex chars");
+    assert_eq!(v.md5.len(), 32, "md5 is 32 hex chars");
+    assert_eq!(v.alt_index, 2, "[a2] parses to alt-index 2");
+    assert_eq!(
+        v.byte_len,
+        Some(adf_for(name).len() as u64),
+        "size comes from the blob without reading it into the view"
+    );
+    assert!(v.tosec_name.as_deref().is_some_and(|n| n.contains("a2")));
+}
+
+#[test]
 fn exact_duplicate_is_collapsed() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open_memory(dir.path()).unwrap();
