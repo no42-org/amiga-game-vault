@@ -399,3 +399,107 @@ fn export_set_refuses_incomplete_lineage() {
     assert!(vault.export_set(rep, "A-Team").is_err());
     assert!(vault.export_set(rep, "Nonexistent").is_err());
 }
+
+#[test]
+fn work_groups_releases_and_playable_sets_with_trainer_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    // Two demos + a 3-disk CSL game whose boot disk has a plain and a trained variant.
+    ingest(&vault, "Agony (demo-playable) (1991)(Psygnosis)[h PRD].adf");
+    ingest(&vault, "Agony (demo-rolling) (1991)(Psygnosis).adf");
+    ingest(&vault, "Agony (1992)(Psygnosis)(Disk 1 of 3)[cr CSL].adf");
+    ingest(
+        &vault,
+        "Agony (1992)(Psygnosis)(Disk 1 of 3)[cr CSL][t +9 TLPI].adf",
+    );
+    ingest(&vault, "Agony (1992)(Psygnosis)(Disk 2 of 3)[cr CSL].adf");
+    ingest(&vault, "Agony (1992)(Psygnosis)(Disk 3 of 3)[cr CSL].adf");
+
+    // The Work gathers the game and both demos.
+    let works = vault.list_works(Some("Agony"), None, None).unwrap();
+    assert_eq!(works.len(), 1);
+    let w = &works[0];
+    assert_eq!(w.name, "Agony");
+    assert_eq!((w.game_count, w.demo_count), (1, 2));
+
+    let game = w.releases.iter().find(|r| r.category == "game").unwrap();
+    let rep = game.rep_edition_id;
+
+    // Playable sets: CSL is a complete, recommended variation with a trainer choice.
+    let sets = vault.playable_sets(rep).unwrap();
+    let csl = sets
+        .iter()
+        .find(|s| s.lineage.as_deref() == Some("CSL"))
+        .unwrap();
+    assert!(csl.complete && csl.is_recommended && csl.disks.len() == 3);
+    assert_eq!(csl.trainer_options.len(), 2);
+    let trained = csl
+        .trainer_options
+        .iter()
+        .find(|t| t.trainer.as_deref() == Some("+9 TLPI"))
+        .unwrap();
+    let plain = csl
+        .trainer_options
+        .iter()
+        .find(|t| t.trainer.is_none())
+        .unwrap();
+    assert!(
+        plain.is_default,
+        "ranking prefers the trainer-free boot disk"
+    );
+
+    // Default download uses the plain boot; the override swaps in the trained boot.
+    let default_files = vault.export_set(rep, "CSL").unwrap();
+    assert!(default_files.len() == 3 && default_files.iter().any(|(n, _)| n.contains(&plain.uid)));
+    let trained_files = vault
+        .export_set_with(rep, "CSL", Some(&trained.uid))
+        .unwrap();
+    assert!(trained_files.iter().any(|(n, _)| n.contains(&trained.uid)));
+    // An invalid boot override falls back to the default (still a complete set).
+    assert_eq!(
+        vault
+            .export_set_with(rep, "CSL", Some("deadbeef00"))
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn single_release_title_is_a_trivial_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    ingest(&vault, "Zool (1992)(Gremlin)[cr PDX].adf");
+    let works = vault.list_works(Some("Zool"), None, None).unwrap();
+    assert_eq!(works.len(), 1);
+    assert_eq!(works[0].release_count, 1);
+    assert_eq!(works[0].game_count, 1);
+}
+
+#[test]
+fn original_uncracked_set_is_downloadable() {
+    // A clean uncracked multi-disk game (no [cr]/[h]) is the "original" lineage;
+    // its coherent set must be exportable (regression: empty lineage tag).
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    ingest(&vault, "Lemmings (1991)(Psygnosis)(Disk 1 of 2).adf");
+    ingest(&vault, "Lemmings (1991)(Psygnosis)(Disk 2 of 2).adf");
+
+    let works = vault.list_works(Some("Lemmings"), None, None).unwrap();
+    let game = works[0]
+        .releases
+        .iter()
+        .find(|r| r.category == "game")
+        .unwrap();
+    let sets = vault.playable_sets(game.rep_edition_id).unwrap();
+    let orig = sets.iter().find(|s| s.lineage.is_none()).unwrap();
+    assert!(orig.complete, "the uncracked original set is complete");
+    // The original (empty lineage tag) exports as a coherent 2-disk set.
+    assert_eq!(
+        vault
+            .export_set_with(game.rep_edition_id, "", None)
+            .unwrap()
+            .len(),
+        2
+    );
+}

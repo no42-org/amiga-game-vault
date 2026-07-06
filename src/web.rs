@@ -29,8 +29,10 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/logo.png", get(logo))
         .route("/api/editions", get(editions))
+        .route("/api/works", get(works))
         .route("/api/sets", get(sets))
         .route("/api/sets/{id}/lineages", get(set_lineages))
+        .route("/api/sets/{id}/playable", get(playable))
         .route("/export/set/{id}/{lineage}", get(export_set))
         .route("/api/editions/{id}/variants", get(variants))
         .route("/api/editions/{id}/primary", post(set_primary))
@@ -126,6 +128,23 @@ async fn sets(
     Ok(Json(serde_json::json!({ "sets": rows })))
 }
 
+async fn works(
+    State(state): State<AppState>,
+    Query(p): Query<BrowseParams>,
+) -> Result<Json<serde_json::Value>, AppErr> {
+    let v = lock(&state);
+    let rows = v.list_works(p.q.as_deref(), p.category.as_deref(), p.language.as_deref())?;
+    Ok(Json(serde_json::json!({ "works": rows })))
+}
+
+async fn playable(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, AppErr> {
+    let v = lock(&state);
+    Ok(Json(serde_json::json!({ "sets": v.playable_sets(id)? })))
+}
+
 async fn set_lineages(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -142,18 +161,30 @@ async fn set_lineages(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+struct BootParam {
+    boot: Option<String>,
+}
+
 async fn export_set(
     State(state): State<AppState>,
     Path((id, lineage)): Path<(i64, String)>,
+    Query(p): Query<BootParam>,
 ) -> Result<Response, AppErr> {
+    // "-" is the reserved segment for the original (no-group) set — its stored
+    // lineage tag is the empty string, which can't be an empty path segment.
+    let tag = if lineage == "-" { "" } else { lineage.as_str() };
     let files = {
         let v = lock(&state);
-        v.export_set(id, &lineage)?
+        v.export_set_with(id, tag, p.boot.as_deref())?
     };
-    let safe: String = lineage
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
+    let safe: String = if tag.is_empty() {
+        "original".to_string()
+    } else {
+        tag.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    };
     let zip = build_zip(&files)?;
     Ok((
         [
@@ -402,8 +433,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <select id="category"><option value="">all categories</option>
       <option>game</option><option>tool</option><option>demo</option></select>
     <input id="language" placeholder="lang (en, es…)" size="8">
-    <select id="status"><option value="">all sets</option>
-      <option value="incomplete">incomplete sets</option></select>
     <button onclick="load()">Search</button>
     <a href="#" onclick="loadQuarantine();return false">Quarantine</a>
     <a href="#" onclick="reidentify();return false">Re-identify</a>
@@ -421,44 +450,96 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <script>
 async function load() {
   const p = new URLSearchParams();
-  for (const k of ['q','category','language','status']) {
+  for (const k of ['q','category','language']) {
     const val = document.getElementById(k).value.trim();
     if (val) p.set(k, val);
   }
-  const { sets } = await (await fetch('/api/sets?' + p)).json();
+  const { works } = await (await fetch('/api/works?' + p)).json();
   const list = document.getElementById('list');
-  list.innerHTML = sets.length ? '' : '<p class=meta>Nothing here. Use "Upload files"/"Upload folder" above, or drag ADFs onto the page.</p>';
-  for (const s of sets) {
+  list.innerHTML = works.length ? '' : '<p class=meta>Nothing here. Use "Upload files"/"Upload folder" above, or drag ADFs onto the page.</p>';
+  for (const w of works) {
     const div = document.createElement('div');
     div.className = 'edition';
-    const bits = [s.category];
-    if (s.qualifier) bits.push(esc(s.qualifier));
-    if (s.publisher) bits.push(esc(s.publisher));
-    if (s.year) bits.push(s.year);
-    if (s.language) bits.push(s.language);
-    let sub;
-    if (s.multi) {
-      const have = s.disks_present.length, need = s.disk_count || have;
-      bits.push(`${have}/${need} disks`);
-      sub = s.complete_lineages > 0
-        ? `<span class="primary">${s.complete_lineages} complete set(s)</span>` + (s.primary_lineage ? ` · ★ ${esc(s.primary_lineage)}` : '')
-        : `<span class="s-rejected">no complete set — missing a disk</span>`;
-    } else {
-      sub = `${s.variant_count} variant(s) · <a href="/export/edition/${s.rep_edition_id}">export</a>`;
-    }
-    div.innerHTML = `<div class="title">${esc(s.title)} <span class="meta">${bits.join(' · ')}</span></div>
-      <div class="meta">${sub}</div>
-      <div class="variants" id="v${s.rep_edition_id}"></div>`;
+    const counts = [];
+    if (w.game_count) counts.push(w.game_count + ' game');
+    if (w.demo_count) counts.push(w.demo_count + ' demo');
+    if (w.tool_count) counts.push(w.tool_count + ' tool');
+    div.innerHTML = `<div class="title">${esc(w.name)} <span class="meta">${counts.join(' · ')}</span></div>
+      <div class="variants"></div>`;
+    const box = div.querySelector('.variants');
     div.querySelector('.title').style.cursor = 'pointer';
-    div.querySelector('.title').onclick = () => toggle(s.rep_edition_id, s.multi);
+    div.querySelector('.title').onclick = () => {
+      box.classList.toggle('open');
+      if (box.dataset.loaded) return;
+      box.innerHTML = w.releases.map(renderReleaseRow).join('');
+      box.dataset.loaded = '1';
+    };
     list.appendChild(div);
   }
 }
-async function toggle(id, multi) {
-  const box = document.getElementById('v' + id);
+function renderReleaseRow(r) {
+  const bits = [];
+  if (r.qualifier) bits.push(esc(r.qualifier));
+  if (r.publisher) bits.push(esc(r.publisher));
+  if (r.year) bits.push(r.year);
+  if (r.version) bits.push(esc(r.version));
+  if (r.language) bits.push(r.language);
+  const meta = bits.length ? ' · ' + bits.join(' · ') : '';
+  if (r.category === 'game') {
+    const disks = `${r.disks_present.length}/${r.disk_count || r.disks_present.length} disks`;
+    return `<div class="variant">
+        <span style="cursor:pointer" onclick="togglePlayable(${r.rep_edition_id})"><b>game</b>${meta} · ${disks} ▸</span>
+        <span class="meta">${r.complete_lineages} playable set(s)</span></div>
+      <div class="variants" id="pl${r.rep_edition_id}"></div>`;
+  }
+  return `<div class="variant">
+      <span><b>${esc(r.category)}</b>${meta}</span>
+      <span class="meta">${r.variant_count} variant(s) · <a href="/export/edition/${r.rep_edition_id}">download</a></span></div>`;
+}
+async function togglePlayable(rep) {
+  const box = document.getElementById('pl' + rep);
   box.classList.toggle('open');
   if (box.dataset.loaded) return;
-  box.innerHTML = multi ? await renderLineages(id) : await renderVariants(id);
+  box.innerHTML = await renderPlayable(rep);
+  box.dataset.loaded = '1';
+}
+async function renderPlayable(rep) {
+  const { sets } = await (await fetch(`/api/sets/${rep}/playable`)).json();
+  const rows = sets.map(s => {
+    const name = s.lineage ? esc(s.lineage) : 'original';
+    const star = s.is_recommended ? '★ ' : '';
+    if (!s.complete) {
+      return `<div class="variant"><span style="opacity:.55"><code>${name}</code></span>
+        <span class="meta s-rejected">missing disk ${s.missing_disks.join(',')}</span></div>`;
+    }
+    const enc = s.lineage ? encodeURIComponent(s.lineage) : '-';
+    if (s.trainer_options && s.trainer_options.length) {
+      const key = 'tr' + rep + '_' + (s.lineage || 'orig').replace(/[^A-Za-z0-9]/g, '');
+      const opts = s.trainer_options.map(t =>
+        `<option value="${esc(t.uid)}"${t.is_default ? ' selected' : ''}>${t.trainer ? esc(t.trainer) : 'no trainer'}</option>`).join('');
+      return `<div class="variant"><span class="${s.is_recommended ? 'primary' : ''}">${star}<code>${name}</code> <select id="${key}">${opts}</select></span>
+        <span class="meta"><span class="primary">complete</span> · <a href="#" onclick="downloadSet(${rep},'${enc}','${key}');return false">download set</a></span></div>`;
+    }
+    return `<div class="variant"><span class="${s.is_recommended ? 'primary' : ''}">${star}<code>${name}</code></span>
+      <span class="meta"><span class="primary">complete</span> · <a href="/export/set/${rep}/${enc}">download set</a></span></div>`;
+  }).join('');
+  return rows +
+    `<div class="meta" style="margin-top:6px"><a href="#" onclick="toggleDisks(${rep});return false">inspect disks</a></div>` +
+    `<div class="variants" id="disks${rep}"></div>`;
+}
+function downloadSet(rep, encLineage, selId) {
+  const uid = document.getElementById(selId).value;
+  window.location = `/export/set/${rep}/${encLineage}?boot=${encodeURIComponent(uid)}`;
+}
+async function toggleDisks(rep) {
+  const box = document.getElementById('disks' + rep);
+  box.classList.toggle('open');
+  if (box.dataset.loaded) return;
+  const { disks } = await (await fetch(`/api/sets/${rep}/lineages`)).json();
+  box.innerHTML = (disks || []).map(d => `<div class="variant">
+      <span style="cursor:pointer" onclick="expandDisk(${d.edition_id})">Disk ${d.disk_no} ▸</span>
+      <span class="meta"><a href="/export/edition/${d.edition_id}">export disk</a></span></div>
+    <div class="variants" id="dv${d.edition_id}"></div>`).join('');
   box.dataset.loaded = '1';
 }
 async function renderVariants(id) {
@@ -467,27 +548,6 @@ async function renderVariants(id) {
       <span class="${v.is_primary ? 'primary' : ''}">${v.is_primary ? '★ ' : ''}<code>${esc(v.canonical_name)}</code></span>
       <span class="meta">${v.dump_type || '?'}${v.crack_group ? ' · ' + esc(v.crack_group) : ''}${v.verified ? ' · verified' : ''}
         · <a href="/download/${v.uid}">download</a></span></div>`).join('');
-}
-async function renderLineages(id) {
-  const { lineages, disks } = await (await fetch(`/api/sets/${id}/lineages`)).json();
-  // Disks section — always reachable, even when no lineage is complete.
-  const diskRows = (disks || []).map(d => `<div class="variant">
-      <span style="cursor:pointer" onclick="expandDisk(${d.edition_id})">Disk ${d.disk_no} ▸</span>
-      <span class="meta"><a href="/export/edition/${d.edition_id}">export disk</a></span></div>
-    <div class="variants" id="dv${d.edition_id}"></div>`).join('');
-  const linRows = lineages.map(l => {
-    const name = l.lineage ? esc(l.lineage) : '(no group)';
-    const badge = l.complete
-      ? '<span class="primary">complete</span>'
-      : `<span class="s-rejected">disks ${l.disks_covered.join(',')}</span>`;
-    const exp = (l.complete && l.lineage)
-      ? ` · <a href="/export/set/${id}/${encodeURIComponent(l.lineage)}">export set</a>` : '';
-    return `<div class="variant">
-      <span class="${l.is_primary ? 'primary' : ''}">${l.is_primary ? '★ ' : ''}<code>${name}</code></span>
-      <span class="meta">${badge}${exp}</span></div>`;
-  }).join('');
-  return `<div class="meta" style="margin:2px 0">Disks</div>${diskRows}` +
-    `<div class="meta" style="margin:6px 0 2px">Coherent sets</div>${linRows}`;
 }
 async function expandDisk(ed) {
   const box = document.getElementById('dv' + ed);
