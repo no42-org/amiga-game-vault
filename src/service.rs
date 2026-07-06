@@ -55,6 +55,9 @@ pub struct SetView {
     pub publisher: Option<String>,
     pub year: Option<i32>,
     pub version: Option<String>,
+    /// Sortable natural-version key (see [`crate::naming::version_key`]); `None`
+    /// when the release has no version. Drives the browse version timeline.
+    pub version_key: Option<String>,
     pub language: Option<String>,
     pub qualifier: Option<String>,
     pub disk_count: Option<u32>,
@@ -464,6 +467,7 @@ impl Vault {
                 category: rep.category.clone(),
                 publisher: rep.publisher.clone(),
                 year: rep.year,
+                version_key: rep.version.as_deref().map(crate::naming::version_key),
                 version: rep.version.clone(),
                 language: rep.language.clone(),
                 qualifier: rep.qualifier.clone(),

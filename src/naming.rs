@@ -231,6 +231,52 @@ pub fn sanitize_title(title: &str) -> String {
     collapsed.trim_matches('-').to_string()
 }
 
+/// Digits a numeric version component is zero-padded to in [`version_key`].
+/// Amiga-era versions are tiny; a component wider than this falls back to a
+/// verbatim (lexical) rendering rather than mis-sorting.
+const VERSION_FIELD_WIDTH: usize = 6;
+
+/// Build a sortable key for a version string so that plain lexical comparison of
+/// two keys matches natural version order: `version_key("v1.10") >
+/// version_key("v1.9")`, and `version_key("v1.0") == version_key("v1.00")`.
+///
+/// A leading `v`/`V` is stripped; the version is split on any non-alphanumeric
+/// run into components, each normalized by [`version_field`] (leading digits
+/// zero-padded, trailing non-numeric suffix kept). Trailing all-zero components
+/// are dropped so `v1`, `v1.0` and `v1.00` share one key.
+pub fn version_key(v: &str) -> String {
+    let t = v.trim();
+    let body = t.strip_prefix(['v', 'V']).unwrap_or(t);
+    let mut fields: Vec<String> = body
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(version_field)
+        .collect();
+    // Drop trailing all-zero components so `v1`, `v1.0` and `v1.00` share one
+    // key, but keep at least one field so `v0`/`v0.0` don't collapse to an empty
+    // key (which downstream would read as "no version").
+    while fields.len() > 1 && fields.last().is_some_and(|f| f.bytes().all(|b| b == b'0')) {
+        fields.pop();
+    }
+    fields.join(".")
+}
+
+/// Normalize one version component: zero-pad its leading numeric run to a fixed
+/// width (so `10` sorts after `9`) and keep any trailing non-numeric suffix —
+/// e.g. a revision letter — after it, so `1.2a` still sorts between `1.2` and
+/// `1.3`. A component with no leading digit (or a numeric run too wide for
+/// `u64`) is kept verbatim in lowercase.
+fn version_field(comp: &str) -> String {
+    let digits: String = comp.chars().take_while(|c| c.is_ascii_digit()).collect();
+    match digits.parse::<u64>() {
+        Ok(n) => {
+            let rest = comp[digits.len()..].to_ascii_lowercase();
+            format!("{n:0w$}{rest}", w = VERSION_FIELD_WIDTH)
+        }
+        Err(_) => comp.to_ascii_lowercase(),
+    }
+}
+
 /// Normalize a version token to always start with a lowercase `v`.
 fn normalize_version(v: &str) -> String {
     let trimmed = v.trim();
@@ -323,6 +369,48 @@ pub fn parse_canonical(filename: &str) -> Option<Canonical> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_key_orders_numerically_not_lexically() {
+        // Lexically "v1.10" < "v1.2" < "v1.9"; naturally the reverse-ish.
+        assert!(version_key("v1.10") > version_key("v1.9"));
+        assert!(version_key("v1.2") < version_key("v1.9"));
+        assert!(version_key("v1.9") < version_key("v1.10"));
+        assert!(version_key("v2.0") > version_key("v1.99"));
+    }
+
+    #[test]
+    fn version_key_ignores_trailing_zeros_and_v_prefix() {
+        assert_eq!(version_key("v1.0"), version_key("v1.00"));
+        assert_eq!(version_key("v1"), version_key("v1.0"));
+        assert_eq!(version_key("V1.0"), version_key("1.0")); // case + optional prefix
+    }
+
+    #[test]
+    fn version_key_non_numeric_is_deterministic_and_total() {
+        // No panic on messy input, and a stable total order under re-sorting.
+        let mut a = ["1.2a", "final", "v1.2", "1.2b", "", "rev A", "v10"];
+        let key = |s: &&str| version_key(s);
+        a.sort_by_key(key);
+        let once: Vec<String> = a.iter().map(|s| version_key(s)).collect();
+        a.sort_by_key(key); // idempotent
+        let twice: Vec<String> = a.iter().map(|s| version_key(s)).collect();
+        assert_eq!(once, twice);
+        // A numeric version still sorts below a larger numeric one regardless of tails.
+        assert!(version_key("v1.2") < version_key("v10"));
+        // A revision-letter suffix sorts between its base and the next number.
+        assert!(version_key("v1.2") < version_key("v1.2a"));
+        assert!(version_key("v1.2a") < version_key("v1.3"));
+    }
+
+    #[test]
+    fn version_key_zero_version_is_not_empty() {
+        // `v0`/`v0.0` are a real (if odd) version, not "no version": the key must
+        // stay non-empty so the browse timeline keeps them as a version node.
+        assert!(!version_key("v0").is_empty());
+        assert_eq!(version_key("v0"), version_key("v0.0"));
+        assert!(version_key("v0") < version_key("v1"));
+    }
 
     #[test]
     fn parse_a10_variant() {
