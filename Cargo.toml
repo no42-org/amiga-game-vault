@@ -27,3 +27,7 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 hex = "0.4"
 thiserror = "2"
 tempfile = "3"
+# Enrichment: fetch editorial metadata/screenshots from online Amiga libraries.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "gzip", "json"] }
+scraper = "0.27"
+async-trait = "0.1"

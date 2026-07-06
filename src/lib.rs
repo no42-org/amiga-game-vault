@@ -10,6 +10,7 @@
 //! - [`naming`]: TOSEC filename parsing, title sanitization, and the canonical
 //!   filename schema (`Title-Kebab_vVer_lang_dNNofMM_uid.adf`).
 //! - [`edition`]: the Title -> Edition -> Artifact identity model and dump flags.
+//! - [`enrich`]: online metadata providers (description/genre/screenshots).
 //! - [`ranking`]: non-destructive primary selection within an Edition.
 //! - [`store`]: the content-addressed blob store.
 //! - [`dat`]: reference DAT import and hash lookup.
@@ -19,6 +20,7 @@
 pub mod dat;
 pub mod db;
 pub mod edition;
+pub mod enrich;
 pub mod error;
 pub mod identity;
 pub mod ingest;

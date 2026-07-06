@@ -49,6 +49,8 @@ pub enum IngestOutcome {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SetView {
     pub rep_edition_id: i64,
+    /// The logical work this release belongs to; the key for enrichment.
+    pub title_id: i64,
     pub multi: bool,
     pub title: String,
     pub category: String,
@@ -71,6 +73,11 @@ pub struct SetView {
     pub original_count: usize,
     pub cracked_count: usize,
     pub hacked_count: usize,
+    /// Merged online metadata for the work (description/genre/screenshots), or
+    /// `None` when the title has not been enriched. Same object is served by the
+    /// per-title meta endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<crate::db::TitleMeta>,
 }
 
 /// A Work: everything sharing a title name (the game release(s) and demos),
@@ -514,6 +521,8 @@ impl Vault {
             }
             sets.push(SetView {
                 rep_edition_id: rep.edition_id,
+                title_id: rep.title_id,
+                meta: None,
                 multi,
                 title: rep.title.clone(),
                 category: rep.category.clone(),
@@ -540,6 +549,16 @@ impl Vault {
                 .then(a.qualifier.cmp(&b.qualifier))
                 .then(a.disk_count.cmp(&b.disk_count))
         });
+        // Attach enrichment, reading only the shown titles' rows (not the whole
+        // table). One title_id can back several sets (versions/categories), so
+        // dedup the lookup ids but keep `.cloned()` — every set needs its copy.
+        let mut ids: Vec<i64> = sets.iter().map(|s| s.title_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let meta_by_title = self.db.title_meta_for(&ids)?;
+        for s in &mut sets {
+            s.meta = meta_by_title.get(&s.title_id).cloned();
+        }
         Ok(sets)
     }
 
@@ -826,6 +845,88 @@ impl Vault {
             out.push((v.canonical_name, bytes));
         }
         Ok(out)
+    }
+
+    // --- Enrichment --------------------------------------------------------
+
+    /// Titles to enrich, as provider queries (see [`crate::db::Db::titles_for_enrich`]).
+    pub fn titles_for_enrich(
+        &self,
+        only: Option<i64>,
+        skip_fetched: bool,
+    ) -> Result<Vec<crate::enrich::TitleQuery>> {
+        Ok(self
+            .db
+            .titles_for_enrich(only, skip_fetched)?
+            .into_iter()
+            .map(
+                |(title_id, name, category, year)| crate::enrich::TitleQuery {
+                    title_id,
+                    name,
+                    year,
+                    category,
+                },
+            )
+            .collect())
+    }
+
+    /// Persist a merged enrichment record: store each screenshot's bytes in the
+    /// content-addressed blob store, then write metadata and screenshots in one
+    /// transaction. `images` are `(bytes, mime, caption, source, ord)`.
+    ///
+    /// If the merge expected screenshots but every download failed (a transient
+    /// image-CDN error), the existing screenshots are kept rather than wiped —
+    /// only a run that actually produced images (or one that legitimately found
+    /// none) replaces them.
+    pub fn save_enrichment(
+        &self,
+        title_id: i64,
+        merged: &crate::enrich::Merged,
+        images: &[crate::enrich::ScreenshotBytes],
+    ) -> Result<()> {
+        let mut shots = Vec::with_capacity(images.len());
+        for (bytes, mime, caption, source, ord) in images {
+            let (hashes, _is_new) = self.store.put(bytes)?;
+            shots.push((
+                hashes.sha1,
+                mime.clone(),
+                caption.clone(),
+                source.clone(),
+                *ord,
+            ));
+        }
+        // Replace screenshots when we downloaded some, or when the merge found no
+        // screenshots at all; otherwise (expected some, got none) leave them be.
+        let shots_arg = if !shots.is_empty() || merged.shots.is_empty() {
+            Some(shots.as_slice())
+        } else {
+            None
+        };
+        self.db.save_enrichment(
+            title_id,
+            merged.genre.as_deref(),
+            merged.description.as_deref(),
+            merged.year,
+            Some(merged.sources.as_str()),
+            merged.external_url.as_deref(),
+            Some(f64::from(merged.score)),
+            crate::enrich::now_secs(),
+            shots_arg,
+        )?;
+        Ok(())
+    }
+
+    /// Merged online metadata (with screenshots) for a title, if enriched.
+    pub fn title_meta(&self, title_id: i64) -> Result<Option<crate::db::TitleMeta>> {
+        self.db.title_meta(title_id)
+    }
+
+    /// A stored screenshot as `(mime, bytes)`, for the `/media/{sha1}` route.
+    pub fn screenshot_media(&self, sha1: &str) -> Result<Option<(String, Vec<u8>)>> {
+        match self.db.screenshot_mime(sha1)? {
+            Some(mime) => Ok(Some((mime, self.store.get(sha1)?))),
+            None => Ok(None),
+        }
     }
 }
 
