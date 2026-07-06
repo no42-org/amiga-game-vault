@@ -400,6 +400,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .variants.open { display: block; }
   .variant { padding: 4px 0; border-top: 1px solid #23262d; display: flex; justify-content: space-between; }
   .primary { color: #7ee081; }
+  .vnode { padding: 6px 0 2px; border-top: 1px solid #23262d; }
+  .vnode .vyear { color: #9aa0aa; font-size: 12px; }
+  .variant.lang { padding-left: 16px; }
+  .demos-split { margin-top: 10px; padding-top: 6px; border-top: 1px dashed #2a2e37;
+    color: #9aa0aa; font-size: 12px; }
   code { color: #c8cdd6; }
   a { color: #6db3f2; }
   .upload-panel { border: 1px solid #2a2e37; border-radius: 8px; margin: 8px 0 16px;
@@ -471,12 +476,72 @@ async function load() {
     div.querySelector('.title').onclick = () => {
       box.classList.toggle('open');
       if (box.dataset.loaded) return;
-      box.innerHTML = w.releases.map(renderReleaseRow).join('');
+      box.innerHTML = renderWork(w);
       box.dataset.loaded = '1';
     };
     list.appendChild(div);
   }
 }
+// A Work expands to a version timeline for its game releases (one node per
+// version, newest-first, year as a badge; language nests as rows), with demos
+// and any other releases listed flat below.
+function renderWork(w) {
+  const games = w.releases.filter(r => r.category === 'game');
+  const others = w.releases.filter(r => r.category !== 'game');
+  let html = versionNodes(games).map(node => {
+    const ver = node.hasVer ? esc(node.version || 'v?') : 'no version';
+    const yr = node.year != null ? node.year : '19xx';
+    return `<div class="vnode"><b>${ver}</b> <span class="vyear">·${yr}</span></div>`
+      + node.rels.map(renderLangRow).join('');
+  }).join('');
+  if (others.length) {
+    html += `<div class="demos-split">other releases</div>` + others.map(renderReleaseRow).join('');
+  }
+  return html;
+}
+// Group game releases into version nodes, ordered (year desc, version desc);
+// version-less releases group by year and slot in inline, unknown year last.
+function versionNodes(games) {
+  const map = new Map();
+  for (const r of games) {
+    const hasVer = r.version_key != null && r.version_key !== '';
+    const key = hasVer ? 'v:' + r.version_key : 'n:' + (r.year != null ? r.year : '');
+    let node = map.get(key);
+    if (!node) { node = { hasVer, vkey: r.version_key || '', version: r.version, year: null, rels: [] }; map.set(key, node); }
+    node.rels.push(r);
+    if (r.year != null && (node.year == null || r.year < node.year)) node.year = r.year;
+    if (!node.version && r.version) node.version = r.version;
+  }
+  const nodes = [...map.values()];
+  nodes.forEach(n => n.rels.sort((a, b) =>
+    (a.language || '').localeCompare(b.language || '') || a.rep_edition_id - b.rep_edition_id));
+  nodes.sort((a, b) => {
+    if (a.year !== b.year) {
+      if (a.year == null) return 1;
+      if (b.year == null) return -1;
+      return b.year - a.year;
+    }
+    if (a.hasVer !== b.hasVer) return a.hasVer ? -1 : 1;
+    if (a.vkey !== b.vkey) return a.vkey < b.vkey ? 1 : -1;
+    return 0;
+  });
+  return nodes;
+}
+// One language row under a version node: leads with language, then the coherent
+// playable-sets picker (reused). A single no-number disk reads "disk".
+function renderLangRow(r) {
+  const bits = [];
+  if (r.language) bits.push(r.language);
+  if (r.qualifier) bits.push(esc(r.qualifier));
+  if (r.publisher) bits.push(esc(r.publisher));
+  const total = r.disk_count || r.disks_present.length;
+  bits.push(total > 1 ? `${r.disks_present.length}/${total} disks` : 'disk');
+  return `<div class="variant lang">
+      <span style="cursor:pointer" onclick="togglePlayable(${r.rep_edition_id})">${bits.join(' · ')} ▸</span>
+      <span class="meta">${r.complete_lineages} playable set(s)</span></div>
+    <div class="variants" id="pl${r.rep_edition_id}"></div>`;
+}
+// A non-game release (demo/tool): a flat, directly-downloadable row.
 function renderReleaseRow(r) {
   const bits = [];
   if (r.qualifier) bits.push(esc(r.qualifier));
@@ -485,14 +550,6 @@ function renderReleaseRow(r) {
   if (r.version) bits.push(esc(r.version));
   if (r.language) bits.push(r.language);
   const meta = bits.length ? ' · ' + bits.join(' · ') : '';
-  if (r.category === 'game') {
-    const total = r.disk_count || r.disks_present.length;
-    const disks = total > 1 ? `${r.disks_present.length}/${total} disks` : 'disk';
-    return `<div class="variant">
-        <span style="cursor:pointer" onclick="togglePlayable(${r.rep_edition_id})"><b>game</b>${meta} · ${disks} ▸</span>
-        <span class="meta">${r.complete_lineages} playable set(s)</span></div>
-      <div class="variants" id="pl${r.rep_edition_id}"></div>`;
-  }
   return `<div class="variant">
       <span><b>${esc(r.category)}</b>${meta}</span>
       <span class="meta">${r.variant_count} variant(s) · <a href="/export/edition/${r.rep_edition_id}">download</a></span></div>`;

@@ -477,6 +477,53 @@ fn single_release_title_is_a_trivial_work() {
 }
 
 #[test]
+fn multi_version_work_exposes_version_timeline_ordering() {
+    // A-Train exists as two versions across two years. The Work's game releases
+    // must carry a sortable `version_key` so the browse timeline can order them
+    // newest-first (v1.01 ·1993 above v1.00 ·1992), with language on the later one.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    ingest(
+        &vault,
+        "A-Train v1.00 (1992)(Ocean - Maxis)(Disk 1 of 2).adf",
+    );
+    ingest(
+        &vault,
+        "A-Train v1.00 (1992)(Ocean - Maxis)(Disk 2 of 2).adf",
+    );
+    ingest(
+        &vault,
+        "A-Train v1.01 (1993)(Ocean - Maxis)(DE)(Disk 1 of 2).adf",
+    );
+    ingest(
+        &vault,
+        "A-Train v1.01 (1993)(Ocean - Maxis)(DE)(Disk 2 of 2).adf",
+    );
+
+    let works = vault.list_works(Some("A-Train"), None, None).unwrap();
+    assert_eq!(works.len(), 1);
+    let w = &works[0];
+    assert_eq!(w.game_count, 2);
+
+    let older = w
+        .releases
+        .iter()
+        .find(|r| r.year == Some(1992))
+        .expect("v1.00 release");
+    let newer = w
+        .releases
+        .iter()
+        .find(|r| r.year == Some(1993))
+        .expect("v1.01 release");
+    // Both versioned, and the newer version sorts strictly above the older one.
+    let ok = older.version_key.as_deref().unwrap();
+    let ne = newer.version_key.as_deref().unwrap();
+    assert!(ne > ok, "v1.01 key {ne:?} must sort above v1.00 key {ok:?}");
+    // The later release is the German-language edition — the timeline's language child.
+    assert_eq!(newer.language.as_deref(), Some("de"));
+}
+
+#[test]
 fn original_uncracked_set_is_downloadable() {
     // A clean uncracked multi-disk game (no [cr]/[h]) is the "original" lineage;
     // its coherent set must be exportable (regression: empty lineage tag).
