@@ -6,6 +6,9 @@ scene variants into one Edition per logical disk, and **normalizes** names to a
 clean, readable form — so a sprawling pile of `A-10 Tank Killer …[h QTX][a2].adf`
 variants collapses into one browsable Edition with a single canonical keeper.
 
+![The Amiga Disk Vault browse UI — a GOG-style cover-art grid of Amiga titles,
+each card badged with its Original / Cracked / Hacked variant counts.](assets/browse-grid.jpg)
+
 - **Ingest** `.adf`, `.adz` (gzip), `.dms` (DiskMasher), and `.zip` uploads.
 - **Identify** by content hash (TOSEC/WHDLoad DATs) or by parsing a TOSEC name.
 - **Deduplicate** non-destructively: exact copies collapse automatically; crack/
