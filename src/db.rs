@@ -798,21 +798,29 @@ impl Db {
         Ok(meta)
     }
 
-    /// All enriched titles' metadata (with screenshots), keyed by title_id — a
-    /// batch load for the browse listing.
-    pub fn all_title_meta(&self) -> Result<std::collections::HashMap<i64, TitleMeta>> {
+    /// Metadata (with screenshots) for the given titles, keyed by title_id — a
+    /// batch load for the browse listing that reads only the rows it needs. `ids`
+    /// are i64s already sourced from the database, so inlining them into the `IN`
+    /// list is injection-safe.
+    pub fn title_meta_for(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, TitleMeta>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
         let mut by_title: std::collections::HashMap<i64, TitleMeta> = self
             .conn
-            .prepare(
-                "SELECT title_id, genre, description, year, sources, external_url FROM title_meta",
-            )?
+            .prepare(&format!(
+                "SELECT title_id, genre, description, year, sources, external_url
+                 FROM title_meta WHERE title_id IN ({list})"
+            ))?
             .query_map([], Self::map_meta)?
             .filter_map(std::result::Result::ok)
             .map(|m| (m.title_id, m))
             .collect();
-        let mut stmt = self.conn.prepare(
-            "SELECT title_id, blob_sha1, mime, caption, source FROM title_screenshot ORDER BY title_id, ord, id",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT title_id, blob_sha1, mime, caption, source FROM title_screenshot
+             WHERE title_id IN ({list}) ORDER BY title_id, ord, id"
+        ))?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, Self::map_shot(r)?)))?;
         for row in rows {
             let (tid, shot) = row?;

@@ -103,7 +103,10 @@ fn providers() -> Vec<Box<dyn MetadataProvider>> {
 
 // --- HTTP -----------------------------------------------------------------
 
-/// A thin async HTTP client shared across providers within one run.
+/// A thin async HTTP client shared across providers within one run. Cheap to
+/// clone (reqwest's `Client` is an `Arc` internally), so screenshot downloads can
+/// fan out across tasks.
+#[derive(Clone)]
 pub struct Http {
     client: reqwest::Client,
 }
@@ -208,20 +211,31 @@ pub async fn run(
             report.skipped += 1;
             continue;
         };
-        // Download screenshot bytes (lock-free).
-        let mut images: Vec<ScreenshotBytes> = Vec::new();
+        // Download screenshot bytes concurrently (independent URLs, lock-free).
+        // Bounded by MAX_SHOTS, so this is a small fan-out, not a flood.
+        let mut set = tokio::task::JoinSet::new();
         for (i, shot) in merged.shots.iter().take(MAX_SHOTS).enumerate() {
-            match http.get_image(&shot.url).await {
-                Ok((bytes, mime)) => images.push((
-                    bytes,
-                    mime,
-                    shot.caption.clone(),
-                    shot.source.clone(),
-                    i as i64,
-                )),
-                Err(e) => eprintln!("enrich: screenshot {} failed: {e}", shot.url),
+            let http = http.clone();
+            let (url, caption, source) =
+                (shot.url.clone(), shot.caption.clone(), shot.source.clone());
+            set.spawn(async move {
+                match http.get_image(&url).await {
+                    Ok((bytes, mime)) => Some((bytes, mime, caption, source, i as i64)),
+                    Err(e) => {
+                        eprintln!("enrich: screenshot {url} failed: {e}");
+                        None
+                    }
+                }
+            });
+        }
+        let mut images: Vec<ScreenshotBytes> = Vec::new();
+        while let Some(res) = set.join_next().await {
+            if let Ok(Some(img)) = res {
+                images.push(img);
             }
         }
+        // Completion order is nondeterministic; restore the merge order via `ord`.
+        images.sort_by_key(|img| img.4);
         {
             let v = state.lock().expect("vault mutex poisoned");
             v.save_enrichment(q.title_id, &merged, &images)?;

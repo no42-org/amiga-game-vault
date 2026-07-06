@@ -477,8 +477,6 @@ impl Vault {
             groups.entry(key).or_default().push(e);
         }
 
-        // Batch-load enrichment once, then attach to each release by title_id.
-        let meta_by_title = self.db.all_title_meta()?;
         let mut sets = Vec::new();
         for (_key, mut editions) in groups {
             editions.sort_by_key(|e| e.disk_no.unwrap_or(0));
@@ -524,7 +522,7 @@ impl Vault {
             sets.push(SetView {
                 rep_edition_id: rep.edition_id,
                 title_id: rep.title_id,
-                meta: meta_by_title.get(&rep.title_id).cloned(),
+                meta: None,
                 multi,
                 title: rep.title.clone(),
                 category: rep.category.clone(),
@@ -551,6 +549,12 @@ impl Vault {
                 .then(a.qualifier.cmp(&b.qualifier))
                 .then(a.disk_count.cmp(&b.disk_count))
         });
+        // Attach enrichment, reading only the shown titles' rows (not the whole table).
+        let ids: Vec<i64> = sets.iter().map(|s| s.title_id).collect();
+        let meta_by_title = self.db.title_meta_for(&ids)?;
+        for s in &mut sets {
+            s.meta = meta_by_title.get(&s.title_id).cloned();
+        }
         Ok(sets)
     }
 
