@@ -49,6 +49,8 @@ pub enum IngestOutcome {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SetView {
     pub rep_edition_id: i64,
+    /// The logical work this release belongs to; the key for enrichment.
+    pub title_id: i64,
     pub multi: bool,
     pub title: String,
     pub category: String,
@@ -71,6 +73,11 @@ pub struct SetView {
     pub original_count: usize,
     pub cracked_count: usize,
     pub hacked_count: usize,
+    /// Merged online metadata for the work (description/genre/screenshots), or
+    /// `None` when the title has not been enriched. Same object is served by the
+    /// per-title meta endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<crate::db::TitleMeta>,
 }
 
 /// A Work: everything sharing a title name (the game release(s) and demos),
@@ -470,6 +477,8 @@ impl Vault {
             groups.entry(key).or_default().push(e);
         }
 
+        // Batch-load enrichment once, then attach to each release by title_id.
+        let meta_by_title = self.db.all_title_meta()?;
         let mut sets = Vec::new();
         for (_key, mut editions) in groups {
             editions.sort_by_key(|e| e.disk_no.unwrap_or(0));
@@ -514,6 +523,8 @@ impl Vault {
             }
             sets.push(SetView {
                 rep_edition_id: rep.edition_id,
+                title_id: rep.title_id,
+                meta: meta_by_title.get(&rep.title_id).cloned(),
                 multi,
                 title: rep.title.clone(),
                 category: rep.category.clone(),
@@ -826,6 +837,76 @@ impl Vault {
             out.push((v.canonical_name, bytes));
         }
         Ok(out)
+    }
+
+    // --- Enrichment --------------------------------------------------------
+
+    /// Titles to enrich, as provider queries (see [`crate::db::Db::titles_for_enrich`]).
+    pub fn titles_for_enrich(
+        &self,
+        only: Option<i64>,
+        skip_fetched: bool,
+    ) -> Result<Vec<crate::enrich::TitleQuery>> {
+        Ok(self
+            .db
+            .titles_for_enrich(only, skip_fetched)?
+            .into_iter()
+            .map(
+                |(title_id, name, category, year)| crate::enrich::TitleQuery {
+                    title_id,
+                    name,
+                    year,
+                    category,
+                },
+            )
+            .collect())
+    }
+
+    /// Persist a merged enrichment record: store each screenshot's bytes in the
+    /// content-addressed blob store, then write the metadata and screenshot rows.
+    /// `images` are `(bytes, mime, caption, source, ord)`.
+    pub fn save_enrichment(
+        &self,
+        title_id: i64,
+        merged: &crate::enrich::Merged,
+        images: &[crate::enrich::ScreenshotBytes],
+    ) -> Result<()> {
+        let mut shots = Vec::with_capacity(images.len());
+        for (bytes, mime, caption, source, ord) in images {
+            let (hashes, _is_new) = self.store.put(bytes)?;
+            shots.push((
+                hashes.sha1,
+                mime.clone(),
+                caption.clone(),
+                source.clone(),
+                *ord,
+            ));
+        }
+        self.db.save_meta(
+            title_id,
+            merged.genre.as_deref(),
+            merged.description.as_deref(),
+            merged.year,
+            Some(merged.sources.as_str()),
+            merged.external_url.as_deref(),
+            Some(f64::from(merged.score)),
+            crate::enrich::now_secs(),
+        )?;
+        self.db.replace_screenshots(title_id, &shots)?;
+        Ok(())
+    }
+
+    /// Merged online metadata (with screenshots) for a title, if enriched.
+    pub fn title_meta(&self, title_id: i64) -> Result<Option<crate::db::TitleMeta>> {
+        self.db.title_meta(title_id)
+    }
+
+    /// A stored screenshot as `(mime, bytes)`, for the `/media/{sha1}` route.
+    pub fn screenshot_media(&self, sha1: &str) -> Result<Option<(String, Vec<u8>)>> {
+        match self.db.screenshot_mime(sha1)? {
+            Some(mime) => Ok(Some((mime, self.store.get(sha1)?))),
+            None => Ok(None),
+        }
     }
 }
 

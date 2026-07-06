@@ -18,9 +18,13 @@ use crate::naming::build_canonical;
 use crate::Result;
 
 const MIGRATION: &str = include_str!("../migrations/0001_init.sql");
+const MIGRATION_0002: &str = include_str!("../migrations/0002_enrichment.sql");
 
 /// The disk count of a set and its sibling Editions as `(edition_id, disk_no)`.
 type SetSiblings = (Option<u32>, Vec<(i64, Option<u32>)>);
+
+/// An enrichment target: `(title_id, name, category, earliest_artifact_year)`.
+pub type EnrichTarget = (i64, String, String, Option<i32>);
 
 /// A new artifact row to insert.
 #[derive(Debug, Clone, Default)]
@@ -53,6 +57,7 @@ pub struct NewArtifact {
 #[derive(Debug, Clone, Serialize)]
 pub struct EditionView {
     pub edition_id: i64,
+    pub title_id: i64,
     pub title: String,
     pub category: String,
     pub version: Option<String>,
@@ -64,6 +69,29 @@ pub struct EditionView {
     pub disk_count: Option<u32>,
     pub primary_uid: Option<String>,
     pub variant_count: i64,
+}
+
+/// Merged editorial metadata for a title (a logical work), with its screenshots.
+#[derive(Debug, Clone, Serialize)]
+pub struct TitleMeta {
+    pub title_id: i64,
+    pub genre: Option<String>,
+    pub description: Option<String>,
+    pub year: Option<i32>,
+    /// Comma-joined providers that contributed to this merged record.
+    pub sources: Option<String>,
+    /// Canonical page on the winning provider.
+    pub external_url: Option<String>,
+    pub screenshots: Vec<Screenshot>,
+}
+
+/// A stored screenshot: bytes live in the [`crate::store::BlobStore`] under `sha1`.
+#[derive(Debug, Clone, Serialize)]
+pub struct Screenshot {
+    pub sha1: String,
+    pub mime: String,
+    pub caption: Option<String>,
+    pub source: String,
 }
 
 /// A view of a single artifact (variant).
@@ -134,6 +162,9 @@ impl Db {
 
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(MIGRATION)?;
+        // Additive enrichment tables (0002). Idempotent CREATE ... IF NOT EXISTS,
+        // so this is safe to run on both fresh and existing databases.
+        self.conn.execute_batch(MIGRATION_0002)?;
         // Bring an `edition` table created before `qualifier` up to the current
         // schema. A plain ALTER ADD COLUMN can't rebuild the UNIQUE constraint
         // (which must now include `qualifier`), so rebuild the table when the
@@ -536,7 +567,7 @@ impl Db {
         let cat = category.unwrap_or("").to_string();
         let lang = language.unwrap_or("").to_string();
         let mut sql = String::from(
-            "SELECT e.id, t.name, t.category, e.version, e.language, e.publisher, e.qualifier,
+            "SELECT e.id, t.id, t.name, t.category, e.version, e.language, e.publisher, e.qualifier,
                     (SELECT MIN(a.year) FROM artifact a WHERE a.edition_id = e.id AND a.year IS NOT NULL) AS yr,
                     e.disk_no, e.disk_count, e.primary_artifact_uid,
                     (SELECT COUNT(*) FROM artifact a WHERE a.edition_id = e.id) AS vc
@@ -561,17 +592,18 @@ impl Db {
             .query_map(params![like, cat, lang], |r| {
                 Ok(EditionView {
                     edition_id: r.get(0)?,
-                    title: r.get(1)?,
-                    category: r.get(2)?,
-                    version: r.get(3)?,
-                    language: r.get(4)?,
-                    publisher: r.get(5)?,
-                    qualifier: r.get(6)?,
-                    year: r.get(7)?,
-                    disk_no: r.get(8)?,
-                    disk_count: r.get(9)?,
-                    primary_uid: r.get(10)?,
-                    variant_count: r.get(11)?,
+                    title_id: r.get(1)?,
+                    title: r.get(2)?,
+                    category: r.get(3)?,
+                    version: r.get(4)?,
+                    language: r.get(5)?,
+                    publisher: r.get(6)?,
+                    qualifier: r.get(7)?,
+                    year: r.get(8)?,
+                    disk_no: r.get(9)?,
+                    disk_count: r.get(10)?,
+                    primary_uid: r.get(11)?,
+                    variant_count: r.get(12)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -651,10 +683,186 @@ impl Db {
 
     /// Delete Titles that no longer have any Editions; returns the count.
     pub fn delete_empty_titles(&self) -> Result<usize> {
-        Ok(self.conn.execute(
+        let n = self.conn.execute(
             "DELETE FROM title WHERE id NOT IN (SELECT title_id FROM edition)",
             [],
-        )?)
+        )?;
+        // Enrichment is keyed by title_id. Drop rows for titles that no longer
+        // exist so a later-reused rowid can't inherit stale metadata. (Screenshot
+        // blobs are content-addressed and left in place, like ADF blobs.)
+        self.conn.execute(
+            "DELETE FROM title_meta WHERE title_id NOT IN (SELECT id FROM title)",
+            [],
+        )?;
+        self.conn.execute(
+            "DELETE FROM title_screenshot WHERE title_id NOT IN (SELECT id FROM title)",
+            [],
+        )?;
+        Ok(n)
+    }
+
+    // --- Enrichment --------------------------------------------------------
+
+    /// Titles to enrich: `only = Some(id)` targets one title, else all titles.
+    /// `skip_fetched` excludes titles that already carry a `title_meta` row.
+    /// Returns `(title_id, name, category, year)`; `year` is the earliest known
+    /// artifact year for the title, a matching hint for providers.
+    pub fn titles_for_enrich(
+        &self,
+        only: Option<i64>,
+        skip_fetched: bool,
+    ) -> Result<Vec<EnrichTarget>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.name, t.category,
+                    (SELECT MIN(a.year) FROM artifact a JOIN edition e ON a.edition_id = e.id
+                     WHERE e.title_id = t.id AND a.year IS NOT NULL) AS yr
+             FROM title t
+             WHERE (?1 = 0 OR t.id = ?1)
+               AND (?2 = 0 OR t.id NOT IN (SELECT title_id FROM title_meta))
+             ORDER BY t.name",
+        )?;
+        let rows = stmt
+            .query_map(params![only.unwrap_or(0), i64::from(skip_fetched)], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Upsert merged editorial metadata for a title.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_meta(
+        &self,
+        title_id: i64,
+        genre: Option<&str>,
+        description: Option<&str>,
+        year: Option<i32>,
+        sources: Option<&str>,
+        external_url: Option<&str>,
+        match_score: Option<f64>,
+        fetched_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO title_meta
+                 (title_id, genre, description, year, sources, external_url, match_score, fetched_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(title_id) DO UPDATE SET
+                 genre=excluded.genre, description=excluded.description, year=excluded.year,
+                 sources=excluded.sources, external_url=excluded.external_url,
+                 match_score=excluded.match_score, fetched_at=excluded.fetched_at",
+            params![title_id, genre, description, year, sources, external_url, match_score, fetched_at],
+        )?;
+        Ok(())
+    }
+
+    /// Replace a title's screenshots with `shots` (`(blob_sha1, mime, caption,
+    /// source, ord)`), so a re-enrich doesn't accumulate duplicates.
+    pub fn replace_screenshots(
+        &self,
+        title_id: i64,
+        shots: &[(String, String, Option<String>, String, i64)],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM title_screenshot WHERE title_id = ?1",
+            [title_id],
+        )?;
+        for (sha1, mime, caption, source, ord) in shots {
+            tx.execute(
+                "INSERT INTO title_screenshot (title_id, blob_sha1, mime, caption, source, ord)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![title_id, sha1, mime, caption, source, ord],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Merged metadata (with screenshots) for a single title, if enriched.
+    pub fn title_meta(&self, title_id: i64) -> Result<Option<TitleMeta>> {
+        let mut meta = self
+            .conn
+            .query_row(
+                "SELECT title_id, genre, description, year, sources, external_url
+                 FROM title_meta WHERE title_id = ?1",
+                [title_id],
+                Self::map_meta,
+            )
+            .optional()?;
+        if let Some(m) = meta.as_mut() {
+            m.screenshots = self.screenshots(title_id)?;
+        }
+        Ok(meta)
+    }
+
+    /// All enriched titles' metadata (with screenshots), keyed by title_id — a
+    /// batch load for the browse listing.
+    pub fn all_title_meta(&self) -> Result<std::collections::HashMap<i64, TitleMeta>> {
+        let mut by_title: std::collections::HashMap<i64, TitleMeta> = self
+            .conn
+            .prepare(
+                "SELECT title_id, genre, description, year, sources, external_url FROM title_meta",
+            )?
+            .query_map([], Self::map_meta)?
+            .filter_map(std::result::Result::ok)
+            .map(|m| (m.title_id, m))
+            .collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT title_id, blob_sha1, mime, caption, source FROM title_screenshot ORDER BY title_id, ord, id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, Self::map_shot(r)?)))?;
+        for row in rows {
+            let (tid, shot) = row?;
+            if let Some(m) = by_title.get_mut(&tid) {
+                m.screenshots.push(shot);
+            }
+        }
+        Ok(by_title)
+    }
+
+    /// A title's screenshots, ordered.
+    pub fn screenshots(&self, title_id: i64) -> Result<Vec<Screenshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT title_id, blob_sha1, mime, caption, source FROM title_screenshot
+             WHERE title_id = ?1 ORDER BY ord, id",
+        )?;
+        let rows = stmt
+            .query_map([title_id], Self::map_shot)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The MIME type of a stored screenshot blob, for the `/media` route.
+    pub fn screenshot_mime(&self, sha1: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT mime FROM title_screenshot WHERE blob_sha1 = ?1 LIMIT 1",
+                [sha1],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    fn map_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<TitleMeta> {
+        Ok(TitleMeta {
+            title_id: r.get(0)?,
+            genre: r.get(1)?,
+            description: r.get(2)?,
+            year: r.get(3)?,
+            sources: r.get(4)?,
+            external_url: r.get(5)?,
+            screenshots: Vec::new(),
+        })
+    }
+
+    fn map_shot(r: &rusqlite::Row<'_>) -> rusqlite::Result<Screenshot> {
+        Ok(Screenshot {
+            sha1: r.get(1)?,
+            mime: r.get(2)?,
+            caption: r.get(3)?,
+            source: r.get(4)?,
+        })
     }
 }
 

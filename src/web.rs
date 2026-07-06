@@ -37,6 +37,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/editions/{id}/variants", get(variants))
         .route("/api/editions/{id}/primary", post(set_primary))
         .route("/api/artifact/{uid}", get(artifact))
+        .route("/api/titles/{id}/enrich", post(enrich_title))
+        .route("/api/titles/{id}/meta", get(title_meta))
+        .route("/api/enrich", post(enrich_all))
+        .route("/media/{sha1}", get(media))
         .route("/api/upload", post(upload))
         .route("/api/import-dat", post(import_dat))
         .route("/api/quarantine", get(quarantine))
@@ -207,6 +211,63 @@ async fn artifact(
     match v.get_artifact(&uid)? {
         Some(a) => Ok(Json(serde_json::to_value(a).unwrap())),
         None => Err(AppErr(Error::NotFound(format!("artifact {uid}")))),
+    }
+}
+
+/// Enrich one title now (fetches over the network, then persists). One title is
+/// quick, so this awaits and returns the fresh metadata. The [`Vault`] mutex is
+/// not held across the network — [`crate::enrich::run`] locks only briefly.
+async fn enrich_title(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, AppErr> {
+    let report = crate::enrich::run(state.clone(), Some(id), false).await?;
+    let meta = {
+        let v = lock(&state);
+        v.title_meta(id)?
+    };
+    Ok(Json(serde_json::json!({ "report": report, "meta": meta })))
+}
+
+/// Bulk-enrich every not-yet-enriched title in the background; returns at once.
+async fn enrich_all(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppErr> {
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::enrich::run(bg, None, true).await {
+            eprintln!("bulk enrich failed: {e}");
+        }
+    });
+    Ok(Json(serde_json::json!({ "started": true })))
+}
+
+/// Merged online metadata (with screenshots) for a title, or `null` if unenriched.
+async fn title_meta(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, AppErr> {
+    let v = lock(&state);
+    Ok(Json(serde_json::json!({ "meta": v.title_meta(id)? })))
+}
+
+/// Serve a stored screenshot by its blob sha1 (local, relative URL).
+async fn media(
+    State(state): State<AppState>,
+    Path(sha1): Path<String>,
+) -> Result<Response, AppErr> {
+    let found = {
+        let v = lock(&state);
+        v.screenshot_media(&sha1)?
+    };
+    match found {
+        Some((mime, bytes)) => Ok((
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, "public, max-age=86400".to_string()),
+            ],
+            bytes,
+        )
+            .into_response()),
+        None => Err(AppErr(Error::NotFound(format!("media {sha1}")))),
     }
 }
 
@@ -505,6 +566,20 @@ const INDEX_HTML: &str = r##"<!doctype html>
   a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
+  /* Enrichment block: genre badge, description, screenshot strip. */
+  .enrich { padding: 8px 0 2px; }
+  .enrich-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .genre { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; color: var(--accent);
+    background: color-mix(in oklch, var(--accent) 15%, transparent); }
+  .btn-sm { padding: 3px 9px; font-size: 11px; }
+  .src { font-size: 11px; }
+  .enrich-desc { margin: 6px 0 4px; color: color-mix(in oklch, var(--foreground) 88%, transparent);
+    font-size: 13px; max-width: 70ch; }
+  .shots { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 2px; }
+  .shot { height: 116px; width: auto; border-radius: 6px; border: 1px solid var(--border);
+    flex: none; background: var(--secondary); }
+
   .upload-panel { border: 1px solid var(--border); border-radius: var(--radius);
     margin: 6px 0 16px; padding: 10px 12px;
     background: color-mix(in oklch, var(--card) 70%, var(--background)); }
@@ -561,6 +636,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <button class="btn" onclick="load()">Search</button>
     <a href="#" onclick="loadQuarantine();return false">Quarantine</a>
     <a href="#" onclick="reidentify();return false">Re-identify</a>
+    <a href="#" onclick="enrichAll();return false">Enrich all</a>
   </div>
   <div class="legend">
     <span class="t-original"><span data-ic="shield"></span>Original — untouched factory image</span>
@@ -684,7 +760,8 @@ function setType(t) {
 function renderWork(w) {
   const games = w.releases.filter(r => r.category === 'game');
   const others = w.releases.filter(r => r.category !== 'game');
-  let html = versionNodes(games).map(node => {
+  let html = metaBlock(w);
+  html += versionNodes(games).map(node => {
     const ver = node.hasVer ? esc(node.version || 'v?') : 'no version';
     const yr = node.year != null ? node.year : '19xx';
     return `<div class="vnode"><b>${ver}</b> <span class="vyear">·${yr}</span></div>`
@@ -843,6 +920,62 @@ async function reidentify() {
   const note = document.createElement('p');
   note.className = 'meta';
   note.textContent = `Re-identified — scanned ${rep.scanned}, moved ${rep.moved}, removed ${rep.editions_removed} edition(s) / ${rep.titles_removed} title(s).`;
+  document.getElementById('list').prepend(note);
+}
+// The release whose enrichment represents the Work (prefer a game), and its
+// title_id — the key the enrich endpoint acts on.
+function workMeta(w) {
+  const r = w.releases.find(r => r.category === 'game' && r.meta) || w.releases.find(r => r.meta);
+  return r ? r.meta : null;
+}
+function workTitleId(w) {
+  const r = w.releases.find(r => r.category === 'game') || w.releases[0];
+  return r && r.title_id;
+}
+// Enrichment header + body: genre badge, an Enrich/Re-enrich button, provider
+// provenance, description, and a local screenshot strip (relative /media URLs).
+function metaBlock(w) {
+  const m = workMeta(w);
+  const tid = workTitleId(w);
+  let head = '<div class="enrich-head">';
+  if (m && m.genre) head += `<span class="genre">${esc(m.genre)}</span>`;
+  head += `<button class="btn btn-sm" onclick="enrichWork(${tid}, this)">${m ? 'Re-enrich' : 'Enrich'}</button>`;
+  if (m && m.sources) head += `<span class="meta src">via ${esc(m.sources)}</span>`;
+  head += '</div>';
+  let body = '';
+  if (m && m.description) body += `<p class="enrich-desc">${esc(m.description)}</p>`;
+  if (m && m.screenshots && m.screenshots.length) {
+    body += '<div class="shots">' + m.screenshots.map(s =>
+      `<a href="/media/${s.sha1}" target="_blank" rel="noopener"><img class="shot" loading="lazy" src="/media/${s.sha1}" alt="${esc(s.caption || 'screenshot')}"></a>`).join('') + '</div>';
+  }
+  return `<div class="enrich">${head}${body}</div>`;
+}
+// Enrich one Work's representative title, then refresh the listing to show it.
+async function enrichWork(tid, btn) {
+  if (!tid) return;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Enriching…';
+  try {
+    const r = await (await fetch(`/api/titles/${tid}/enrich`, { method: 'POST' })).json();
+    await load();
+    if (!r.meta) {
+      const note = document.createElement('p');
+      note.className = 'meta';
+      note.textContent = 'No confident match found online for this title.';
+      document.getElementById('list').prepend(note);
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+// Kick off a background bulk enrich of every not-yet-enriched title.
+async function enrichAll() {
+  await fetch('/api/enrich', { method: 'POST' });
+  const note = document.createElement('p');
+  note.className = 'meta';
+  note.textContent = 'Enrichment started in the background — reload in a moment to see descriptions and screenshots.';
   document.getElementById('list').prepend(note);
 }
 function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -1022,6 +1155,10 @@ mod tests {
             "--original",
             "--cracked",
             "--hacked",
+            "metaBlock",   // enrichment block (genre/description/screenshots)
+            "enrichWork(", // per-work enrich action
+            "enrichAll(",  // bulk enrich action
+            "/media/",     // local screenshot route
         ] {
             assert!(
                 INDEX_HTML.contains(marker),
