@@ -96,6 +96,8 @@ pub struct PlayableSet {
     pub missing_disks: Vec<u32>,
     pub is_recommended: bool,
     /// Coherent `(disk_no, uid)` (best per disk); empty for an incomplete variation.
+    /// Internal only (drives trainer options) — not shipped to the client.
+    #[serde(skip)]
     pub disks: Vec<(u32, String)>,
     /// Boot-disk trainer choices for this lineage.
     pub trainer_options: Vec<TrainerOption>,
@@ -522,9 +524,11 @@ impl Vault {
     ) -> Result<Vec<(String, Vec<u8>)>> {
         use std::collections::BTreeMap;
         let (dc, members) = self.gather_set(edition_id)?;
+        // `lineage` is the empty string for the original (no-group) set, which is
+        // stored as `None` — compare via unwrap_or("") so it matches.
         let complete = lineage_coverage(&members, dc)
             .iter()
-            .any(|c| c.lineage.as_deref() == Some(lineage) && c.complete);
+            .any(|c| c.lineage.as_deref().unwrap_or("") == lineage && c.complete);
         if !complete {
             return Err(Error::Invalid(format!(
                 "lineage '{lineage}' is not a complete set"
@@ -540,7 +544,7 @@ impl Vault {
                 m.tiebreak == b
                     && m.disk_no == boot_disk
                     && !m.info.disqualified()
-                    && m.lineage.clone().unwrap_or_default() == lineage
+                    && m.lineage.as_deref().unwrap_or("") == lineage
             });
             if valid {
                 chosen.insert(boot_disk, b.to_string());
@@ -643,7 +647,7 @@ impl Vault {
         for (i, m) in members.iter().enumerate() {
             if m.info.disqualified()
                 || m.disk_no != boot_disk
-                || m.lineage.clone().unwrap_or_default() != lineage
+                || m.lineage.as_deref().unwrap_or("") != lineage
             {
                 continue;
             }

@@ -171,14 +171,20 @@ async fn export_set(
     Path((id, lineage)): Path<(i64, String)>,
     Query(p): Query<BootParam>,
 ) -> Result<Response, AppErr> {
+    // "-" is the reserved segment for the original (no-group) set — its stored
+    // lineage tag is the empty string, which can't be an empty path segment.
+    let tag = if lineage == "-" { "" } else { lineage.as_str() };
     let files = {
         let v = lock(&state);
-        v.export_set_with(id, &lineage, p.boot.as_deref())?
+        v.export_set_with(id, tag, p.boot.as_deref())?
     };
-    let safe: String = lineage
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
+    let safe: String = if tag.is_empty() {
+        "original".to_string()
+    } else {
+        tag.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    };
     let zip = build_zip(&files)?;
     Ok((
         [
@@ -506,7 +512,7 @@ async function renderPlayable(rep) {
       return `<div class="variant"><span style="opacity:.55"><code>${name}</code></span>
         <span class="meta s-rejected">missing disk ${s.missing_disks.join(',')}</span></div>`;
     }
-    const enc = encodeURIComponent(s.lineage || '');
+    const enc = s.lineage ? encodeURIComponent(s.lineage) : '-';
     if (s.trainer_options && s.trainer_options.length) {
       const key = 'tr' + rep + '_' + (s.lineage || 'orig').replace(/[^A-Za-z0-9]/g, '');
       const opts = s.trainer_options.map(t =>

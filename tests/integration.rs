@@ -475,3 +475,31 @@ fn single_release_title_is_a_trivial_work() {
     assert_eq!(works[0].release_count, 1);
     assert_eq!(works[0].game_count, 1);
 }
+
+#[test]
+fn original_uncracked_set_is_downloadable() {
+    // A clean uncracked multi-disk game (no [cr]/[h]) is the "original" lineage;
+    // its coherent set must be exportable (regression: empty lineage tag).
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open_memory(dir.path()).unwrap();
+    ingest(&vault, "Lemmings (1991)(Psygnosis)(Disk 1 of 2).adf");
+    ingest(&vault, "Lemmings (1991)(Psygnosis)(Disk 2 of 2).adf");
+
+    let works = vault.list_works(Some("Lemmings"), None, None).unwrap();
+    let game = works[0]
+        .releases
+        .iter()
+        .find(|r| r.category == "game")
+        .unwrap();
+    let sets = vault.playable_sets(game.rep_edition_id).unwrap();
+    let orig = sets.iter().find(|s| s.lineage.is_none()).unwrap();
+    assert!(orig.complete, "the uncracked original set is complete");
+    // The original (empty lineage tag) exports as a coherent 2-disk set.
+    assert_eq!(
+        vault
+            .export_set_with(game.rep_edition_id, "", None)
+            .unwrap()
+            .len(),
+        2
+    );
+}
