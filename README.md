@@ -133,6 +133,7 @@ docker run --rm -v amiga-game-vault_vault-data:/from -v amiga-disk-vault_vault-d
 | `GET  /api/artifact/{uid}`             | Full metadata for a UID.                 |
 | `POST /api/titles/{id}/enrich`         | Enrich one title from online libraries.  |
 | `POST /api/enrich`                     | Bulk-enrich all un-enriched titles.      |
+| `GET  /api/enrich/status`              | Live progress of the bulk enrich.        |
 | `GET  /api/titles/{id}/meta`           | Online metadata + screenshots for a title.|
 | `GET  /media/{sha1}`                   | A stored screenshot's bytes.             |
 | `GET  /download/{uid}`                 | Download an artifact (canonical name).   |

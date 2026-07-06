@@ -80,6 +80,88 @@ pub struct EnrichReport {
     pub skipped: usize,
 }
 
+/// Live progress of a bulk ("enrich all") run, published for the UI to poll.
+/// Separate from the [`Vault`] mutex so a status read never blocks enrichment.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct EnrichProgress {
+    pub running: bool,
+    pub total: usize,
+    pub done: usize,
+    /// Title currently being processed.
+    pub current: Option<String>,
+    pub enriched: usize,
+    pub skipped: usize,
+    /// Set once a run has completed (retains the last run's tally until the next).
+    pub finished: bool,
+}
+
+static PROGRESS: Mutex<EnrichProgress> = Mutex::new(EnrichProgress {
+    running: false,
+    total: 0,
+    done: 0,
+    current: None,
+    enriched: 0,
+    skipped: 0,
+    finished: false,
+});
+
+/// A snapshot of the current bulk-progress state (for the status endpoint).
+pub fn progress_snapshot() -> EnrichProgress {
+    PROGRESS.lock().expect("progress mutex poisoned").clone()
+}
+
+/// Claim the single bulk-run slot: sets `running` and resets counters, returning
+/// `true` if acquired, `false` if a run is already in progress. Decided
+/// synchronously by the handler before spawning, so two starts can't both launch.
+pub fn progress_try_start() -> bool {
+    let mut p = PROGRESS.lock().expect("progress mutex poisoned");
+    if p.running {
+        return false;
+    }
+    *p = EnrichProgress {
+        running: true,
+        ..Default::default()
+    };
+    true
+}
+
+/// Mark the bulk run finished (running cleared, tally retained).
+fn progress_finish() {
+    let mut p = PROGRESS.lock().expect("progress mutex poisoned");
+    p.running = false;
+    p.finished = true;
+    p.current = None;
+}
+
+/// Clears the bulk-progress `running` flag when dropped, so any exit from `run()`
+/// — a normal return, an early `?`, or a panic unwinding the spawned task —
+/// finalizes progress and can't wedge it at `running = true`. Instantiated only
+/// for the bulk run, so `run()` owns its whole progress lifecycle.
+struct ProgressGuard;
+impl Drop for ProgressGuard {
+    fn drop(&mut self) {
+        progress_finish();
+    }
+}
+
+fn progress_set_total(total: usize) {
+    PROGRESS.lock().expect("progress mutex poisoned").total = total;
+}
+
+fn progress_set_current(name: &str) {
+    PROGRESS.lock().expect("progress mutex poisoned").current = Some(name.to_string());
+}
+
+fn progress_done(enriched: bool) {
+    let mut p = PROGRESS.lock().expect("progress mutex poisoned");
+    p.done += 1;
+    if enriched {
+        p.enriched += 1;
+    } else {
+        p.skipped += 1;
+    }
+}
+
 /// Minimum name-match score for a provider result to be accepted.
 const SCORE_FLOOR: f32 = 0.55;
 /// Cap on screenshots stored per title.
@@ -212,15 +294,26 @@ pub async fn run(
     only: Option<i64>,
     skip_fetched: bool,
 ) -> Result<EnrichReport> {
+    // Publish progress only for the whole-catalog run; the per-title path
+    // (`only = Some`) is fast and must not drive the global bar. The guard is
+    // created up front so it finalizes even if the work-list read below fails.
+    let track = only.is_none();
+    let _progress = track.then_some(ProgressGuard);
     let queries: Vec<TitleQuery> = {
         let v = state.lock().expect("vault mutex poisoned");
         v.titles_for_enrich(only, skip_fetched)?
     };
+    if track {
+        progress_set_total(queries.len());
+    }
     let http = Http::new()?;
     let provs = providers();
     let mut report = EnrichReport::default();
 
     for q in queries {
+        if track {
+            progress_set_current(&q.name);
+        }
         let mut results = Vec::new();
         for p in &provs {
             if !p.available() {
@@ -234,6 +327,9 @@ pub async fn run(
         }
         let Some(merged) = merge(results) else {
             report.skipped += 1;
+            if track {
+                progress_done(false);
+            }
             continue;
         };
         // Download this title's cover + screenshots concurrently (independent URLs,
@@ -274,6 +370,9 @@ pub async fn run(
             v.save_enrichment(q.title_id, &merged, &images)?;
         }
         report.enriched += 1;
+        if track {
+            progress_done(true);
+        }
     }
     Ok(report)
 }
