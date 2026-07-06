@@ -1,6 +1,6 @@
 # Amiga Disk Vault
 
-A self-hosted ROM manager for Amiga **ADF** disk images. It ingests uploads,
+A self-hosted catalog for Amiga **ADF** disk images. It ingests uploads,
 identifies them against reference DATs (or by TOSEC filename), **deduplicates**
 scene variants into one Edition per logical disk, and **normalizes** names to a
 clean, readable form — so a sprawling pile of `A-10 Tank Killer …[h QTX][a2].adf`

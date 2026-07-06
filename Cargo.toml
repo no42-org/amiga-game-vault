@@ -1,8 +1,8 @@
 [package]
 name = "amiga-disk-vault"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
-description = "Self-hosted ADF ROM manager: ingest, identify, deduplicate and normalize Amiga disk images"
+description = "Self-hosted catalog for Amiga ADF disk images: ingest, identify, deduplicate, normalize"
 license = "MIT"
 
 [[bin]]
