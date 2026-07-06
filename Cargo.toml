@@ -1,6 +1,6 @@
 [package]
 name = "amiga-disk-vault"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Self-hosted catalog for Amiga ADF disk images: ingest, identify, deduplicate, normalize"
 license = "MIT"
