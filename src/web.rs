@@ -40,6 +40,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/titles/{id}/enrich", post(enrich_title))
         .route("/api/titles/{id}/meta", get(title_meta))
         .route("/api/enrich", post(enrich_all))
+        .route("/api/enrich/status", get(enrich_status))
         .route("/media/{sha1}", get(media))
         .route("/api/upload", post(upload))
         .route("/api/import-dat", post(import_dat))
@@ -229,29 +230,28 @@ async fn enrich_title(
     Ok(Json(serde_json::json!({ "report": report, "meta": meta })))
 }
 
-/// Single-flight guard so overlapping "Enrich all" clicks can't launch parallel
-/// background crawls that hammer the providers and race on the same titles.
-static BULK_ENRICH_RUNNING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Bulk-enrich every not-yet-enriched title in the background; returns at once.
-/// If a bulk run is already in flight, this is a no-op (`started: false`).
+/// Single-flight via the shared progress `running` flag: if a run is already in
+/// flight this is a no-op (`started: false, busy: true`). Progress is published to
+/// `GET /api/enrich/status` for the UI to poll.
 async fn enrich_all(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppErr> {
-    use std::sync::atomic::Ordering;
-    if BULK_ENRICH_RUNNING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+    if !crate::enrich::progress_try_start() {
         return Ok(Json(serde_json::json!({ "started": false, "busy": true })));
     }
     let bg = state.clone();
     tokio::spawn(async move {
+        // `run` finalizes its own progress via an internal drop guard, so a
+        // failure — or a panic unwinding this task — still clears `running`.
         if let Err(e) = crate::enrich::run(bg, None, true).await {
             eprintln!("bulk enrich failed: {e}");
         }
-        BULK_ENRICH_RUNNING.store(false, Ordering::Release);
     });
     Ok(Json(serde_json::json!({ "started": true })))
+}
+
+/// Live progress of the current/last bulk enrichment (for the UI's progress bar).
+async fn enrich_status() -> Json<crate::enrich::EnrichProgress> {
+    Json(crate::enrich::progress_snapshot())
 }
 
 /// Merged online metadata (with screenshots) for a title, or `null` if unenriched.
@@ -716,6 +716,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <label><input type="checkbox" id="gcComplete"> Completeness</label>
   </div>
   <div id="uploadPanel" class="upload-panel" hidden></div>
+  <div id="enrichPanel" class="upload-panel" hidden></div>
   <div id="list"></div>
 </main>
 <div id="overlayBg" class="overlay-bg" onclick="closeOverlay()"></div>
@@ -1174,13 +1175,55 @@ async function enrichWork(tid, btn) {
     btn.textContent = label;
   }
 }
-// Kick off a background bulk enrich of every not-yet-enriched title.
-async function enrichAll() {
-  await fetch('/api/enrich', { method: 'POST' });
-  const note = document.createElement('p');
-  note.className = 'meta';
-  note.textContent = 'Enrichment started in the background — reload in a moment to see descriptions and screenshots.';
-  document.getElementById('list').prepend(note);
+// Kick off a background bulk enrich of every not-yet-enriched title. Fire-and-poll:
+// single-flight is server-side, so a 'busy' response just attaches to the run.
+function enrichAll() {
+  fetch('/api/enrich', { method: 'POST' });
+  startEnrichPolling();
+}
+// --- Enrich-all progress (server-side; survives reload / any tab) ----------
+let enrichTimer = null;
+let enrichErrs = 0;
+function stopEnrichPolling() {
+  if (enrichTimer) { clearInterval(enrichTimer); enrichTimer = null; }
+}
+function renderEnrichProgress(s) {
+  const panel = document.getElementById('enrichPanel');
+  if (s.running) {
+    panel.hidden = false;
+    panel.innerHTML = `<div class="u-head">
+        <progress class="u-bar" value="${s.done}" max="${Math.max(s.total, 1)}"></progress>
+        <span class="u-count">${s.done} / ${s.total}</span></div>
+      <div class="u-summary">Enriching…${s.current ? ' ' + esc(s.current) : ''}</div>`;
+  } else if (s.finished) {
+    // Show a summary for any completed run, including one that had nothing to do.
+    panel.hidden = false;
+    panel.innerHTML = `<div class="u-summary">Enrichment done — ${s.enriched} enriched · ${s.skipped} skipped</div>`;
+  } else {
+    panel.hidden = true;
+  }
+}
+async function pollEnrichStatus() {
+  let s;
+  try { s = await (await fetch('/api/enrich/status')).json(); }
+  catch (e) { if (++enrichErrs >= 3) stopEnrichPolling(); return; } // give up if the server is gone
+  enrichErrs = 0;
+  renderEnrichProgress(s);
+  if (!s.running && enrichTimer) {
+    stopEnrichPolling();
+    if (s.finished) load(); // refresh the listing once a run completes
+  }
+}
+function startEnrichPolling() {
+  enrichErrs = 0;
+  pollEnrichStatus();
+  if (!enrichTimer) enrichTimer = setInterval(pollEnrichStatus, 1000);
+}
+// On load, attach the bar to a run already in progress (from any tab / reload).
+async function attachEnrichIfRunning() {
+  let s;
+  try { s = await (await fetch('/api/enrich/status')).json(); } catch (e) { return; }
+  if (s.running) startEnrichPolling();
 }
 function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
@@ -1321,6 +1364,7 @@ function addRow(name, cls, status) {
 }
 initIcons();
 initGridControls();
+attachEnrichIfRunning();
 load();
 </script>
 </body>
@@ -1370,6 +1414,9 @@ mod tests {
             "tile-art",            // portrait cover tile
             "tile-fallback",       // generated coverless tile
             "openWorkOverlay",     // tile-click detail overlay
+            "/api/enrich/status",  // bulk enrich progress endpoint
+            "pollEnrichStatus",    // progress poller
+            "id=\"enrichPanel\"",  // progress bar panel
         ] {
             assert!(
                 INDEX_HTML.contains(marker),
